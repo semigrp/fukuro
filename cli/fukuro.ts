@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { openDb, dbPath, type EventRow } from './db.ts';
 
@@ -32,8 +33,14 @@ Usage:
   fukuro init                              Create the database
   fukuro log-event <kind> [options]        Append one event
   fukuro events [--limit N] [--json]       Show recent events
-  fukuro report [--days N] [--json]        KPI summary
+  fukuro report [--days N] [--format text|json|md] [--out <path>]
+                                           KPI summary (+ open hypotheses)
   fukuro help
+
+report options:
+  --format <f>     text (default) / json / md — md is meant for export:
+                   pipe or --out it into GitHub comments, Notion, an Obsidian vault
+  --out <path>     Write the report to a file instead of stdout
 
 log-event options:
   --loop <id>      Logical loop name (e.g. parent issue slug)
@@ -55,6 +62,15 @@ interface CliValues {
   days: string;
   limit: string;
   json: boolean;
+  format: string;
+  out?: string;
+}
+
+interface OpenHypothesis {
+  id: string;
+  claim: string | null;
+  loop_id: string | null;
+  opened_at: string;
 }
 
 interface MergedPr {
@@ -77,6 +93,8 @@ function main(): void {
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
+      format: { type: 'string', default: 'text' },
+      out: { type: 'string' },
     },
   });
   const cli = values as CliValues;
@@ -179,6 +197,32 @@ function report(values: CliValues): void {
   const since = `-${days} days`;
   const db = openDb();
 
+  // Open hypotheses are computed across ALL time, not the window: a claim opened
+  // last month and never closed is exactly what the report must surface.
+  const openedRows = db
+    .prepare(
+      `SELECT json_extract(data,'$.id') AS id,
+              json_extract(data,'$.claim') AS claim,
+              loop_id,
+              MIN(ts) AS opened_at
+       FROM events
+       WHERE kind = 'hypothesis_opened' AND json_extract(data,'$.id') IS NOT NULL
+       GROUP BY json_extract(data,'$.id')`,
+    )
+    .all() as unknown as OpenHypothesis[];
+  const closedIds = new Set(
+    (
+      db
+        .prepare(
+          `SELECT DISTINCT json_extract(data,'$.id') AS id FROM events
+           WHERE kind IN ('hypothesis_confirmed','hypothesis_refuted')
+             AND json_extract(data,'$.id') IS NOT NULL`,
+        )
+        .all() as unknown as { id: string }[]
+    ).map((row) => row.id),
+  );
+  const openHypotheses = openedRows.filter((row) => !closedIds.has(row.id));
+
   const byKind = db
     .prepare(
       `SELECT kind, COUNT(*) AS n FROM events
@@ -223,26 +267,126 @@ function report(values: CliValues): void {
     ticks_per_merge: merges ? Math.round((count('tick') / merges) * 100) / 100 : null,
     stop_line_hits: count('stop_line_hit'),
     human_interventions: count('human_intervention'),
+    hypotheses: {
+      opened_in_window: count('hypothesis_opened'),
+      confirmed_in_window: count('hypothesis_confirmed'),
+      refuted_in_window: count('hypothesis_refuted'),
+      open: openHypotheses,
+    },
     prs: mergedPrs,
   };
   db.close();
 
-  if (values.json) {
-    console.log(JSON.stringify(summary, null, 2));
-    return;
+  const format = values.json ? 'json' : values.format;
+  let output: string;
+  if (format === 'json') {
+    output = JSON.stringify(summary, null, 2);
+  } else if (format === 'md') {
+    output = renderMarkdown(summary, byKind);
+  } else {
+    output = renderText(summary, byKind);
   }
 
-  console.log(`fukuro report — last ${days} day(s)\n`);
-  console.log('events by kind:');
-  for (const r of byKind) console.log(`  ${r.kind.padEnd(20)} ${r.n}`);
-  if (byKind.length === 0) console.log('  (no events)');
-  console.log('');
-  console.log(`merged PRs:                ${summary.merged_prs}`);
-  console.log(`review rounds / merged PR: ${summary.review_rounds_per_merged_pr ?? '-'}`);
-  console.log(`median lead time (hours):  ${summary.median_lead_hours ?? '-'}`);
-  console.log(`ticks / merge:             ${summary.ticks_per_merge ?? '-'}`);
-  console.log(`stop-line hits:            ${summary.stop_line_hits}`);
-  console.log(`human interventions:       ${summary.human_interventions}`);
+  if (values.out !== undefined) {
+    writeFileSync(values.out, output + '\n');
+    console.log(`wrote ${values.out}`);
+  } else {
+    console.log(output);
+  }
+}
+
+type ReportSummary = {
+  window_days: number;
+  merged_prs: number;
+  review_rounds_per_merged_pr: number | null;
+  median_lead_hours: number | null;
+  ticks_per_merge: number | null;
+  stop_line_hits: number;
+  human_interventions: number;
+  hypotheses: {
+    opened_in_window: number;
+    confirmed_in_window: number;
+    refuted_in_window: number;
+    open: OpenHypothesis[];
+  };
+  prs: MergedPr[];
+};
+
+function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
+  const lines: string[] = [];
+  lines.push(`fukuro report — last ${summary.window_days} day(s)`, '');
+  lines.push('events by kind:');
+  for (const r of byKind) lines.push(`  ${r.kind.padEnd(20)} ${r.n}`);
+  if (byKind.length === 0) lines.push('  (no events)');
+  lines.push('');
+  lines.push(`merged PRs:                ${summary.merged_prs}`);
+  lines.push(`review rounds / merged PR: ${summary.review_rounds_per_merged_pr ?? '-'}`);
+  lines.push(`median lead time (hours):  ${summary.median_lead_hours ?? '-'}`);
+  lines.push(`ticks / merge:             ${summary.ticks_per_merge ?? '-'}`);
+  lines.push(`stop-line hits:            ${summary.stop_line_hits}`);
+  lines.push(`human interventions:       ${summary.human_interventions}`);
+  const h = summary.hypotheses;
+  lines.push('');
+  lines.push(
+    `hypotheses (window):       opened ${h.opened_in_window} / confirmed ${h.confirmed_in_window} / refuted ${h.refuted_in_window}`,
+  );
+  lines.push(`open hypotheses (all):     ${h.open.length}`);
+  for (const item of h.open) {
+    lines.push(`  ${item.id}  ${item.claim ?? '(no claim)'}  [${item.loop_id ?? '-'}]`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Markdown renderer, meant for export. fukuro deliberately ships no API clients —
+ * deliver this through connectors instead: `--out` into an Obsidian vault,
+ * `gh issue comment --body-file`, or an agent pasting it into Notion.
+ */
+function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
+  const h = summary.hypotheses;
+  const lines: string[] = [];
+  lines.push(`# fukuro report — last ${summary.window_days} day(s)`, '');
+  lines.push(`_generated ${new Date().toISOString()}_`, '');
+  lines.push('## KPIs', '');
+  lines.push('| metric | value |');
+  lines.push('|---|---|');
+  lines.push(`| merged PRs | ${summary.merged_prs} |`);
+  lines.push(`| review rounds / merged PR | ${summary.review_rounds_per_merged_pr ?? '–'} |`);
+  lines.push(`| median lead time (hours) | ${summary.median_lead_hours ?? '–'} |`);
+  lines.push(`| ticks / merge | ${summary.ticks_per_merge ?? '–'} |`);
+  lines.push(`| stop-line hits | ${summary.stop_line_hits} |`);
+  lines.push(`| human interventions | ${summary.human_interventions} |`);
+  lines.push('');
+  lines.push('## Hypotheses', '');
+  lines.push(
+    `Window: opened ${h.opened_in_window} · confirmed ${h.confirmed_in_window} · refuted ${h.refuted_in_window}`,
+    '',
+  );
+  if (h.open.length === 0) {
+    lines.push('No open hypotheses — the exploration loop has converged. 🦉');
+  } else {
+    lines.push(`### Still open (${h.open.length})`, '');
+    for (const item of h.open) {
+      const loop = item.loop_id ? ` — loop \`${item.loop_id}\`` : '';
+      lines.push(`- **${item.id}**: ${item.claim ?? '(no claim recorded)'}${loop} _(opened ${item.opened_at.slice(0, 10)})_`);
+    }
+  }
+  lines.push('');
+  if (summary.prs.length > 0) {
+    lines.push('## Merged PRs', '');
+    lines.push('| PR | review rounds | lead time (h) |');
+    lines.push('|---|---|---|');
+    for (const pr of summary.prs) {
+      lines.push(`| #${pr.pr} | ${pr.review_rounds} | ${pr.lead_hours ?? '–'} |`);
+    }
+    lines.push('');
+  }
+  lines.push('## Events by kind', '');
+  lines.push('| kind | count |');
+  lines.push('|---|---|');
+  for (const r of byKind) lines.push(`| ${r.kind} | ${r.n} |`);
+  if (byKind.length === 0) lines.push('| _(no events)_ | |');
+  return lines.join('\n');
 }
 
 function median(numbers: number[]): number | null {

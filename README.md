@@ -40,6 +40,7 @@ npx fukuro log-event pr_opened   --loop room-view --issue 462 --pr 472
 npx fukuro log-event review_round --pr 472
 npx fukuro log-event merged       --pr 472
 npx fukuro report --days 7
+npx fukuro report --format md --out ~/vault/fukuro-weekly.md   # export: Obsidian/Notion/GitHub
 npx fukuro events --limit 20
 ```
 

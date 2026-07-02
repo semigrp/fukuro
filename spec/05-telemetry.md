@@ -49,6 +49,19 @@ Computed by `fukuro report` over a time window:
 - **stop-line hits** — tree holes and safety pressure
 - **human interventions** — the real autonomy level, measured instead of claimed
 
+## Export: reports go where people already look
+
+Telemetry is only useful if humans see it, and humans live in Notion, Obsidian, GitHub — not in a
+SQLite file. fukuro's answer keeps the zero-dependency, adapter-friendly shape:
+
+- `fukuro report --format md` renders the report as portable Markdown (KPIs, open hypotheses,
+  merged PRs). `--format json` feeds dashboards; `text` stays the terminal default.
+- `--out <path>` writes to a file — pointing it into an Obsidian vault makes the vault the
+  dashboard with zero glue.
+- **Delivery is a connector's job, not fukuro's.** No API clients ship in this CLI. Post the
+  Markdown with `gh issue comment --body-file`, let an agent paste it into a Notion page via MCP,
+  or commit it to a repo on a schedule. One renderer, any destination.
+
 ## Usage in the return path
 
 A change applied in chapter 04 carries an expectation ("review rounds should drop"). The next
