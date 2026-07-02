@@ -15,17 +15,37 @@ const schema = readFileSync(join(here, 'schema.sql'), 'utf8');
 const makeCli = () => {
   const dir = mkdtempSync(join(tmpdir(), 'fukuro-cli-'));
   const dbFile = join(dir, 'test.db');
-  const run = (...args: string[]): string =>
+  const run = (...args: string[]): string => runEnv({}, ...args);
+  const runEnv = (extraEnv: Record<string, string>, ...args: string[]): string =>
     execFileSync(process.execPath, [bin, ...args], {
       cwd: dir, // not a git repo: derivation yields no project/issue/pr
-      env: { ...process.env, FUKURO_DB: dbFile, FUKURO_SESSION: '' },
+      // Session vars blanked so runs are hermetic even inside an agent harness.
+      env: {
+        ...process.env,
+        FUKURO_DB: dbFile,
+        FUKURO_SESSION: '',
+        CLAUDE_CODE_SESSION_ID: '',
+        ...extraEnv,
+      },
     }).toString();
   const db = () => {
     const handle = new DatabaseSync(dbFile);
     return handle;
   };
-  return { dir, dbFile, run, db };
+  return { dir, dbFile, run, runEnv, db };
 };
+
+test('session derives: FUKURO_SESSION wins, harness id fills in, empty means unset', () => {
+  const cli = makeCli();
+  cli.runEnv({ FUKURO_SESSION: 'explicit' , CLAUDE_CODE_SESSION_ID: 'harness-1' }, 'log-event', 'tick');
+  cli.runEnv({ CLAUDE_CODE_SESSION_ID: 'harness-1' }, 'log-event', 'tick');
+  cli.runEnv({}, 'log-event', 'tick');
+  const rows = cli
+    .db()
+    .prepare('SELECT session FROM events ORDER BY id')
+    .all() as { session: string | null }[];
+  assert.deepEqual(rows.map((r) => r.session), ['explicit', 'harness-1', null]);
+});
 
 test('init creates the database file', () => {
   const cli = makeCli();

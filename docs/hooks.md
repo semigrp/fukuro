@@ -13,8 +13,14 @@ Principles:
 
 ## Session stamping
 
-Set `FUKURO_SESSION` in the environment that launches your agent (shell profile, CI job, harness
-launcher). Every `log-event` picks it up automatically; per-call `--session` is for overrides only.
+On recognized harnesses no setup is needed: when `FUKURO_SESSION` is unset, `log-event` falls back
+to the harness's own per-session id (currently `CLAUDE_CODE_SESSION_ID`), so the `session` column
+fills itself. This exists because the manual export below was documented on day one and still never
+got wired up — an opt-in convention loses to defaults.
+
+Elsewhere, set `FUKURO_SESSION` in the environment that launches your agent (shell profile, CI job,
+harness launcher). Every `log-event` picks it up automatically; per-call `--session` is for
+overrides only. Empty values count as unset.
 
 ```sh
 export FUKURO_SESSION="$(date +%Y%m%d)-$$"

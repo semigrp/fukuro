@@ -2,7 +2,7 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { openDb, dbPath, type EventRow } from './db.ts';
-import { deriveContext, suggestedKinds } from './derive.ts';
+import { deriveContext, deriveSession, suggestedKinds } from './derive.ts';
 
 // Canonical kinds. Unknown kinds are accepted (extensible) but warned about,
 // so typos surface without blocking a running loop.
@@ -56,7 +56,7 @@ log-event options:
   --loop <id>      Logical loop name (e.g. parent issue slug)
   --issue <n>      Issue number
   --pr <n>         Pull request number
-  --session <id>   Session id (default: $FUKURO_SESSION)
+  --session <id>   Session id (default: $FUKURO_SESSION, else a harness session id)
   --data <json>    JSON payload
   --id <id>        Sugar for data.id (unit id, e.g. H-1)
   --claim <text>   Sugar for data.claim (hypothesis claim)
@@ -243,7 +243,7 @@ function logEvent(kind: string | undefined, values: CliValues): void {
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      values.session ?? process.env.FUKURO_SESSION ?? null,
+      values.session ?? deriveSession(),
       loop,
       issue,
       pr,

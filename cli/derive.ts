@@ -86,8 +86,24 @@ export function deriveContext(db: DatabaseSync): DerivedContext {
     pr,
     loop,
     openLoops,
-    session: process.env.FUKURO_SESSION ?? null,
+    session: deriveSession(),
   };
+}
+
+/** Harness-injected per-session ids, consulted when FUKURO_SESSION is unset. */
+const HARNESS_SESSION_VARS = ['CLAUDE_CODE_SESSION_ID'];
+
+/**
+ * Session id, derived at write time (never stored): explicit FUKURO_SESSION wins,
+ * then any known harness-provided id. Empty strings count as unset.
+ */
+export function deriveSession(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.FUKURO_SESSION) return env.FUKURO_SESSION;
+  for (const name of HARNESS_SESSION_VARS) {
+    const value = env[name];
+    if (value) return value;
+  }
+  return null;
 }
 
 /** Event kinds that make sense at the derived node type (progressive disclosure). */
