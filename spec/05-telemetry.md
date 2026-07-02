@@ -66,6 +66,12 @@ SQLite file. fukuro's answer keeps the zero-dependency, adapter-friendly shape:
 - **Delivery is a connector's job, not fukuro's.** No API clients ship in this CLI. Post the
   Markdown with `gh issue comment --body-file`, let an agent paste it into a Notion page via MCP,
   or commit it to a repo on a schedule. One renderer, any destination.
+- **Redaction is structural, not cosmetic.** The DB is private by definition; the export is where
+  leaks happen. `--profile public` removes identifiers and free text (loop ids, issue/PR numbers,
+  hypothesis claims, stop-line names, payloads) from the summary *object itself* before any
+  renderer runs — what isn't in the structure can't leak through a format. Anything leaving the
+  machine for an audience beyond yourself should use it. Scrubbing text after publication is not a
+  substitute: cross-references and timelines on host platforms are often immutable.
 
 ## Usage in the return path
 

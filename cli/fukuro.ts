@@ -32,9 +32,10 @@ const HELP = `fukuro — telemetry for agentic loops (db: ${dbPath()})
 Usage:
   fukuro init                              Create the database
   fukuro log-event <kind> [options]        Append one event
-  fukuro events [--limit N] [--loop <id>] [--json]
+  fukuro events [--limit N] [--loop <id>] [--profile private|public] [--json]
                                            Show recent events
-  fukuro report [--days N] [--loop <id>] [--format text|json|md] [--out <path>]
+  fukuro report [--days N] [--loop <id>] [--profile private|public]
+                [--format text|json|md] [--out <path>]
                                            KPI summary (+ open hypotheses, stop-line breakdown)
   fukuro help
 
@@ -42,6 +43,10 @@ report options:
   --format <f>     text (default) / json / md — md is meant for export:
                    pipe or --out it into GitHub comments, Notion, an Obsidian vault
   --out <path>     Write the report to a file instead of stdout
+  --profile <p>    private (default) shows everything. public redacts identifiers
+                   and free text (loop ids, issue/PR numbers, claims, stop-line
+                   names, payloads) — only counts, KPIs, and kind names remain.
+                   Use public for anything leaving your machine.
 
 log-event options:
   --loop <id>      Logical loop name (e.g. parent issue slug)
@@ -65,6 +70,7 @@ interface CliValues {
   json: boolean;
   format: string;
   out?: string;
+  profile: string;
 }
 
 interface OpenHypothesis {
@@ -101,9 +107,14 @@ function main(): void {
       json: { type: 'boolean', default: false },
       format: { type: 'string', default: 'text' },
       out: { type: 'string' },
+      profile: { type: 'string', default: 'private' },
     },
   });
   const cli = values as CliValues;
+  if (cli.profile !== 'private' && cli.profile !== 'public') {
+    console.error(`--profile must be "private" or "public", got: ${cli.profile}`);
+    process.exit(1);
+  }
 
   const command = positionals[0] ?? 'help';
   switch (command) {
@@ -188,6 +199,16 @@ function listEvents(values: CliValues): void {
           .all(toInt('limit', values.limit) ?? 20)
   ) as unknown as EventRow[];
   db.close();
+  // public profile: timestamps and kinds only — no identifiers, no payloads
+  if (values.profile === 'public') {
+    const redacted = rows.map((r) => ({ ts: r.ts, kind: r.kind }));
+    if (values.json) {
+      console.log(JSON.stringify(redacted, null, 2));
+      return;
+    }
+    for (const r of redacted.reverse()) console.log(`${r.ts}  ${r.kind}`);
+    return;
+  }
   if (values.json) {
     console.log(JSON.stringify(rows, null, 2));
     return;
@@ -280,7 +301,7 @@ function report(values: CliValues): void {
 
   const count = (kind: string): number => byKind.find((r) => r.kind === kind)?.n ?? 0;
   const merges = mergedPrs.length;
-  const summary = {
+  const fullSummary = {
     window_days: days,
     loop,
     events_by_kind: Object.fromEntries(byKind.map((r) => [r.kind, r.n])),
@@ -299,11 +320,25 @@ function report(values: CliValues): void {
       opened_in_window: count('hypothesis_opened'),
       confirmed_in_window: count('hypothesis_confirmed'),
       refuted_in_window: count('hypothesis_refuted'),
+      open_count: openHypotheses.length,
       open: openHypotheses,
     },
     prs: mergedPrs,
   };
   db.close();
+
+  // public profile: identifiers and free text are removed *structurally* —
+  // counts and KPI names are the only things that survive serialization.
+  const summary: ReportSummary =
+    values.profile === 'public'
+      ? {
+          ...fullSummary,
+          loop: fullSummary.loop === null ? null : '(redacted)',
+          stop_lines: [],
+          hypotheses: { ...fullSummary.hypotheses, open: [] },
+          prs: [],
+        }
+      : fullSummary;
 
   const format = values.json ? 'json' : values.format;
   let output: string;
@@ -337,6 +372,7 @@ type ReportSummary = {
     opened_in_window: number;
     confirmed_in_window: number;
     refuted_in_window: number;
+    open_count: number;
     open: OpenHypothesis[];
   };
   prs: MergedPr[];
@@ -364,7 +400,7 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(
     `hypotheses (window):       opened ${h.opened_in_window} / confirmed ${h.confirmed_in_window} / refuted ${h.refuted_in_window}`,
   );
-  lines.push(`open hypotheses (all):     ${h.open.length}`);
+  lines.push(`open hypotheses (all):     ${h.open_count}`);
   for (const item of h.open) {
     lines.push(`  ${item.id}  ${item.claim ?? '(no claim)'}  [${item.loop_id ?? '-'}]`);
   }
@@ -404,10 +440,13 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
     `Window: opened ${h.opened_in_window} · confirmed ${h.confirmed_in_window} · refuted ${h.refuted_in_window}`,
     '',
   );
-  if (h.open.length === 0) {
+  if (h.open_count === 0) {
     lines.push('No open hypotheses — the exploration loop has converged. 🦉');
   } else {
-    lines.push(`### Still open (${h.open.length})`, '');
+    lines.push(`### Still open (${h.open_count})`, '');
+    if (h.open.length === 0) {
+      lines.push('_Details redacted (public profile)._');
+    }
     for (const item of h.open) {
       const loop = item.loop_id ? ` — loop \`${item.loop_id}\`` : '';
       lines.push(`- **${item.id}**: ${item.claim ?? '(no claim recorded)'}${loop} _(opened ${item.opened_at.slice(0, 10)})_`);
