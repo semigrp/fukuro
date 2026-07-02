@@ -29,6 +29,11 @@ One table, `events`: `ts`, `session`, `loop_id`, `issue`, `pr`, `kind`, `data` (
 | `human_intervention` | a human had to act for the loop to proceed (`data.reason`) |
 | `improve_applied` / `improve_reverted` | a return-path change was kept / rolled back |
 | `tokens` | cost sample (`data.count`, `data.model`) |
+| `concept_captured` | a phenomenon was named/defined (spec/06; `data.id`, `data.name`) |
+| `hypothesis_opened` | a testable claim was opened (`data.id`, `data.claim`, `data.closes_when`) |
+| `hypothesis_confirmed` / `hypothesis_refuted` | a hypothesis closed with evidence (`data.id`, `data.evidence`) |
+| `procedure_defined` | a repeatable procedure was written down (`data.id`) |
+| `finding` | an untyped discovery worth recording (prefer typed units when possible) |
 
 Unknown kinds are accepted (warn, don't block): a running loop must never fail because telemetry
 was strict.

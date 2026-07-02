@@ -17,6 +17,13 @@ const CANONICAL_KINDS = new Set([
   'improve_applied',
   'improve_reverted',
   'tokens',
+  // exploration units (spec/06): concept / hypothesis / procedure
+  'concept_captured',
+  'hypothesis_opened',
+  'hypothesis_confirmed',
+  'hypothesis_refuted',
+  'procedure_defined',
+  'finding',
 ]);
 
 const HELP = `fukuro — telemetry for agentic loops (db: ${dbPath()})
