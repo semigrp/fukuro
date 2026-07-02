@@ -1,6 +1,6 @@
 {
   "name": "fukuro",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Telemetry-first foundation for agentic loop engineering: decision-tree routing × DAG decomposition × convergence loops, plus a self-improving return path (fukuro / 復路).",
   "type": "module",
   "bin": {

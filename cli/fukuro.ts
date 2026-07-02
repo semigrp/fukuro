@@ -32,9 +32,10 @@ const HELP = `fukuro — telemetry for agentic loops (db: ${dbPath()})
 Usage:
   fukuro init                              Create the database
   fukuro log-event <kind> [options]        Append one event
-  fukuro events [--limit N] [--json]       Show recent events
-  fukuro report [--days N] [--format text|json|md] [--out <path>]
-                                           KPI summary (+ open hypotheses)
+  fukuro events [--limit N] [--loop <id>] [--json]
+                                           Show recent events
+  fukuro report [--days N] [--loop <id>] [--format text|json|md] [--out <path>]
+                                           KPI summary (+ open hypotheses, stop-line breakdown)
   fukuro help
 
 report options:
@@ -71,6 +72,11 @@ interface OpenHypothesis {
   claim: string | null;
   loop_id: string | null;
   opened_at: string;
+}
+
+interface StopLineRow {
+  line: string | null;
+  n: number;
 }
 
 interface MergedPr {
@@ -172,9 +178,15 @@ function logEvent(kind: string | undefined, values: CliValues): void {
 
 function listEvents(values: CliValues): void {
   const db = openDb();
-  const rows = db
-    .prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?')
-    .all(toInt('limit', values.limit) ?? 20) as unknown as EventRow[];
+  const rows = (
+    values.loop !== undefined
+      ? db
+          .prepare('SELECT * FROM events WHERE loop_id = ? ORDER BY id DESC LIMIT ?')
+          .all(values.loop, toInt('limit', values.limit) ?? 20)
+      : db
+          .prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?')
+          .all(toInt('limit', values.limit) ?? 20)
+  ) as unknown as EventRow[];
   db.close();
   if (values.json) {
     console.log(JSON.stringify(rows, null, 2));
@@ -195,6 +207,10 @@ function listEvents(values: CliValues): void {
 function report(values: CliValues): void {
   const days = toInt('days', values.days) ?? 7;
   const since = `-${days} days`;
+  const loop = values.loop ?? null;
+  // Slice every aggregation by loop when --loop is given.
+  const loopClause = loop === null ? '' : ' AND loop_id = ?';
+  const loopParams = loop === null ? [] : [loop];
   const db = openDb();
 
   // Open hypotheses are computed across ALL time, not the window: a claim opened
@@ -206,29 +222,39 @@ function report(values: CliValues): void {
               loop_id,
               MIN(ts) AS opened_at
        FROM events
-       WHERE kind = 'hypothesis_opened' AND json_extract(data,'$.id') IS NOT NULL
+       WHERE kind = 'hypothesis_opened' AND json_extract(data,'$.id') IS NOT NULL${loopClause}
        GROUP BY json_extract(data,'$.id')`,
     )
-    .all() as unknown as OpenHypothesis[];
+    .all(...loopParams) as unknown as OpenHypothesis[];
   const closedIds = new Set(
     (
       db
         .prepare(
           `SELECT DISTINCT json_extract(data,'$.id') AS id FROM events
            WHERE kind IN ('hypothesis_confirmed','hypothesis_refuted')
-             AND json_extract(data,'$.id') IS NOT NULL`,
+             AND json_extract(data,'$.id') IS NOT NULL${loopClause}`,
         )
-        .all() as unknown as { id: string }[]
+        .all(...loopParams) as unknown as { id: string }[]
     ).map((row) => row.id),
   );
   const openHypotheses = openedRows.filter((row) => !closedIds.has(row.id));
 
+  // Which stop lines fire, not just how often: the return path repairs by name.
+  const stopLines = db
+    .prepare(
+      `SELECT json_extract(data,'$.line') AS line, COUNT(*) AS n
+       FROM events
+       WHERE kind = 'stop_line_hit' AND ts >= datetime('now', ?)${loopClause}
+       GROUP BY line ORDER BY n DESC`,
+    )
+    .all(since, ...loopParams) as unknown as StopLineRow[];
+
   const byKind = db
     .prepare(
       `SELECT kind, COUNT(*) AS n FROM events
-       WHERE ts >= datetime('now', ?) GROUP BY kind ORDER BY n DESC`,
+       WHERE ts >= datetime('now', ?)${loopClause} GROUP BY kind ORDER BY n DESC`,
     )
-    .all(since) as unknown as { kind: string; n: number }[];
+    .all(since, ...loopParams) as unknown as { kind: string; n: number }[];
 
   // Per merged PR: review rounds and open→merge lead time.
   const mergedPrs: MergedPr[] = (
@@ -239,11 +265,11 @@ function report(values: CliValues): void {
                 MIN(CASE WHEN kind = 'merged' THEN ts END) AS merged_ts,
                 SUM(kind = 'review_round') AS review_rounds
          FROM events
-         WHERE pr IS NOT NULL
+         WHERE pr IS NOT NULL${loopClause}
          GROUP BY pr
          HAVING merged_ts IS NOT NULL AND merged_ts >= datetime('now', ?)`,
       )
-      .all(since) as unknown as Omit<MergedPr, 'lead_hours'>[]
+      .all(...loopParams, since) as unknown as Omit<MergedPr, 'lead_hours'>[]
   ).map((r) => ({
     ...r,
     lead_hours:
@@ -256,6 +282,7 @@ function report(values: CliValues): void {
   const merges = mergedPrs.length;
   const summary = {
     window_days: days,
+    loop,
     events_by_kind: Object.fromEntries(byKind.map((r) => [r.kind, r.n])),
     merged_prs: merges,
     review_rounds_per_merged_pr: merges
@@ -266,6 +293,7 @@ function report(values: CliValues): void {
     ),
     ticks_per_merge: merges ? Math.round((count('tick') / merges) * 100) / 100 : null,
     stop_line_hits: count('stop_line_hit'),
+    stop_lines: stopLines,
     human_interventions: count('human_intervention'),
     hypotheses: {
       opened_in_window: count('hypothesis_opened'),
@@ -297,11 +325,13 @@ function report(values: CliValues): void {
 
 type ReportSummary = {
   window_days: number;
+  loop: string | null;
   merged_prs: number;
   review_rounds_per_merged_pr: number | null;
   median_lead_hours: number | null;
   ticks_per_merge: number | null;
   stop_line_hits: number;
+  stop_lines: StopLineRow[];
   human_interventions: number;
   hypotheses: {
     opened_in_window: number;
@@ -314,7 +344,8 @@ type ReportSummary = {
 
 function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
   const lines: string[] = [];
-  lines.push(`fukuro report — last ${summary.window_days} day(s)`, '');
+  const scope = summary.loop === null ? '' : ` — loop ${summary.loop}`;
+  lines.push(`fukuro report — last ${summary.window_days} day(s)${scope}`, '');
   lines.push('events by kind:');
   for (const r of byKind) lines.push(`  ${r.kind.padEnd(20)} ${r.n}`);
   if (byKind.length === 0) lines.push('  (no events)');
@@ -324,6 +355,9 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`median lead time (hours):  ${summary.median_lead_hours ?? '-'}`);
   lines.push(`ticks / merge:             ${summary.ticks_per_merge ?? '-'}`);
   lines.push(`stop-line hits:            ${summary.stop_line_hits}`);
+  for (const row of summary.stop_lines) {
+    lines.push(`  ${row.n}× ${row.line ?? '(no line recorded)'}`);
+  }
   lines.push(`human interventions:       ${summary.human_interventions}`);
   const h = summary.hypotheses;
   lines.push('');
@@ -345,7 +379,8 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
 function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
   const h = summary.hypotheses;
   const lines: string[] = [];
-  lines.push(`# fukuro report — last ${summary.window_days} day(s)`, '');
+  const scope = summary.loop === null ? '' : ` — loop \`${summary.loop}\``;
+  lines.push(`# fukuro report — last ${summary.window_days} day(s)${scope}`, '');
   lines.push(`_generated ${new Date().toISOString()}_`, '');
   lines.push('## KPIs', '');
   lines.push('| metric | value |');
@@ -357,6 +392,13 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| stop-line hits | ${summary.stop_line_hits} |`);
   lines.push(`| human interventions | ${summary.human_interventions} |`);
   lines.push('');
+  if (summary.stop_lines.length > 0) {
+    lines.push('## Stop lines hit', '');
+    for (const row of summary.stop_lines) {
+      lines.push(`- ${row.n}× ${row.line ?? '(no line recorded)'}`);
+    }
+    lines.push('');
+  }
   lines.push('## Hypotheses', '');
   lines.push(
     `Window: opened ${h.opened_in_window} · confirmed ${h.confirmed_in_window} · refuted ${h.refuted_in_window}`,
