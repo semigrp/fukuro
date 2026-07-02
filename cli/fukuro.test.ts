@@ -97,7 +97,7 @@ test('an explicit foreign --loop opts out of issue/pr autofill', () => {
     .db()
     .prepare("SELECT loop_id, issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
     .get() as { loop_id: string; issue: number | null; pr: number | null };
-  assert.deepEqual(inherited, { loop_id: 'A', issue: 7, pr: 9 });
+  assert.deepEqual({ ...inherited }, { loop_id: 'A', issue: 7, pr: 9 });
 
   // logging against a different loop must not graft A's issue/pr onto it
   cli.run('log-event', 'tick', '--loop', 'B');
@@ -105,7 +105,7 @@ test('an explicit foreign --loop opts out of issue/pr autofill', () => {
     .db()
     .prepare("SELECT loop_id, issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
     .get() as { loop_id: string; issue: number | null; pr: number | null };
-  assert.deepEqual(foreign, { loop_id: 'B', issue: null, pr: null });
+  assert.deepEqual({ ...foreign }, { loop_id: 'B', issue: null, pr: null });
 });
 
 /** Seeds a merged-PR lifecycle with controlled timestamps for KPI assertions. */
