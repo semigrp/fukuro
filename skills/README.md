@@ -11,7 +11,7 @@ Generated instance files live in **your** workspace, never in this repository.
 | meta-skill | status | what it does |
 |---|---|---|
 | [bootstrap](bootstrap.md) | ✅ | scan the repo, grill the human for the underivable, generate the local router / loop definition / conventions, verify with one tiny end-to-end loop |
-| decompose | planned | generic decomposition rules (parent=plan, child=one verifiable unit, size budget, approval gate) applied to a runtime goal |
+| [decompose](decompose.md) | ✅ | goal → verifiable DAG: derive from canon+conversation, grill the underivable, tag claims by evidence type, split buildable from blocked, emit a human-readable DAG before filing issues |
 | converge | planned | generic tick discipline parameterized by bootstrap-discovered facts |
 | return-path | planned | evaluate → improve → revert-on-regression, adjudicated by `fukuro report` |
 
