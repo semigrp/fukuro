@@ -1,0 +1,3 @@
+# The shebang (#!/usr/bin/env node) makes linguist classify this .ts file as
+# JavaScript (shebang strategy wins over extension). Override it.
+cli/fukuro.ts linguist-language=TypeScript
