@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -75,6 +75,37 @@ test('a single open loop is auto-filled; loop_start is exempt', () => {
     .prepare("SELECT loop_id FROM events WHERE kind = 'loop_start' ORDER BY id DESC LIMIT 1")
     .get() as { loop_id: string | null };
   assert.equal(start.loop_id, null);
+});
+
+test('an explicit foreign --loop opts out of issue/pr autofill', () => {
+  const cli = makeCli();
+  // make the cwd a git repo on an issue branch so derivation has issue/pr context
+  const git = (args: string) =>
+    execSync(`git -c user.email=t@example.com -c user.name=t ${args}`, {
+      cwd: cli.dir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  git('init -q');
+  git('commit --allow-empty -q -m init');
+  git('checkout -q -b 7-feature');
+  cli.run('log-event', 'loop_start', '--loop', 'A');
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '7', '--pr', '9');
+
+  // positive control: without flags, the derived context attaches fully
+  cli.run('log-event', 'tick');
+  const inherited = cli
+    .db()
+    .prepare("SELECT loop_id, issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
+    .get() as { loop_id: string; issue: number | null; pr: number | null };
+  assert.deepEqual(inherited, { loop_id: 'A', issue: 7, pr: 9 });
+
+  // logging against a different loop must not graft A's issue/pr onto it
+  cli.run('log-event', 'tick', '--loop', 'B');
+  const foreign = cli
+    .db()
+    .prepare("SELECT loop_id, issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
+    .get() as { loop_id: string; issue: number | null; pr: number | null };
+  assert.deepEqual(foreign, { loop_id: 'B', issue: null, pr: null });
 });
 
 /** Seeds a merged-PR lifecycle with controlled timestamps for KPI assertions. */

@@ -211,18 +211,26 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   }
   const db = openDb();
 
-  // Missing fields are filled from the derived context (explicit flags always win).
-  // loop_start is exempt from loop derivation: an open previous loop must not be
-  // mistaken for the loop being started.
+  // Missing fields are filled from the derived context (explicit flags always win),
+  // with two guards against cross-loop misattribution:
+  // - loop_start never autofills: an open previous loop (or the branch's issue/pr)
+  //   must not be grafted onto the loop being started.
+  // - an explicit --loop that differs from the derived loop opts out of issue/pr
+  //   autofill too — those fields belong to the derived loop's context, not this one.
   const needsDerivation =
     values.loop === undefined ||
     values.issue === undefined ||
     values.pr === undefined;
-  const derived = needsDerivation ? deriveContext(db) : null;
-  const loop =
-    values.loop ?? (kind === 'loop_start' ? null : (derived?.loop ?? null));
-  const issue = toInt('issue', values.issue) ?? derived?.issue ?? null;
-  const pr = toInt('pr', values.pr) ?? derived?.pr ?? null;
+  const derived =
+    needsDerivation && kind !== 'loop_start' ? deriveContext(db) : null;
+  const foreignLoop =
+    values.loop !== undefined &&
+    derived?.loop != null &&
+    values.loop !== derived.loop;
+  const loop = values.loop ?? derived?.loop ?? null;
+  const issue =
+    toInt('issue', values.issue) ?? (foreignLoop ? null : (derived?.issue ?? null));
+  const pr = toInt('pr', values.pr) ?? (foreignLoop ? null : (derived?.pr ?? null));
 
   const filled: string[] = [];
   if (values.loop === undefined && loop !== null) filled.push(`loop=${loop}`);
