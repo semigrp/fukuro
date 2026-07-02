@@ -22,7 +22,7 @@ One table, `events`: `ts`, `session`, `loop_id`, `issue`, `pr`, `kind`, `data` (
 | `loop_start` / `loop_end` | a convergence loop begins / finishes a parent goal |
 | `tick` | one stateless tick executed (chapter 03) |
 | `pr_opened` | a child unit's PR is created |
-| `review_round` | one fix→push→reply cycle on a PR |
+| `review_round` | one push that responds to reviewer feedback (see convention below) |
 | `merged` | a PR is merged |
 | `issue_closed` | a child unit is closed out |
 | `stop_line_hit` | the loop halted on a named stop line (`data.line`) |
@@ -37,6 +37,11 @@ One table, `events`: `ts`, `session`, `loop_id`, `issue`, `pr`, `kind`, `data` (
 
 Unknown kinds are accepted (warn, don't block): a running loop must never fail because telemetry
 was strict.
+
+**`review_round` convention:** one round = one push that responds to reviewer feedback, however
+many commits or thread replies it contains. Fix-up pushes for mistakes the loop caught *itself*
+while responding (a broken gate run, a formatting miss) belong to the same round — the metric
+counts reviewer-driven iterations, not raw pushes.
 
 ## Core KPIs
 
