@@ -38,6 +38,11 @@ One table, `events`: `ts`, `session`, `loop_id`, `issue`, `pr`, `kind`, `data` (
 Unknown kinds are accepted (warn, don't block): a running loop must never fail because telemetry
 was strict.
 
+**Capture convention:** set `FUKURO_SESSION` in the environment that launches the agent; let
+harness hooks fire the mechanical events (see [`docs/hooks.md`](../docs/hooks.md)) and context
+derivation fill the fields. Manual flags are overrides, not the default path — manual discipline
+is the least reliable component in the loop.
+
 **`review_round` convention:** one round = one push that responds to reviewer feedback, however
 many commits or thread replies it contains. Fix-up pushes for mistakes the loop caught *itself*
 while responding (a broken gate run, a formatting miss) belong to the same round — the metric
