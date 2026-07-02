@@ -8,6 +8,7 @@
   },
   "files": [
     "cli",
+    "!cli/*.test.ts",
     "README.md",
     "LICENSE",
     "NOTICE"
@@ -17,7 +18,7 @@
   },
   "scripts": {
     "typecheck": "tsc",
-    "test": "node --test cli/"
+    "test": "node --test cli/*.test.ts"
   },
   "repository": {
     "type": "git",
