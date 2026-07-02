@@ -50,7 +50,7 @@ your shell. Canonical event kinds are documented in [`spec/05-telemetry.md`](spe
 ## Repository layout
 
 ```
-spec/       The written specification (chapters 00–05)
+spec/       The written specification (chapters 00–06)
 cli/        The telemetry CLI (node:sqlite, no deps)
 skills/     Generic skill templates for the routing/convergence layers (WIP)
 state/      State-backend adapter contract: GitHub / Notion / markdown / SQLite (WIP)
@@ -69,6 +69,17 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
    loop halts on them, escalating to a human.
 5. **Telemetry over rubrics.** Rubric self-scores saturate; review rounds per PR, lead time, and
    intervention counts do not. Improvements survive only if the metrics say so.
+
+## What fukuro is not
+
+- **Not a lightweight trace-observability tool.** Langfuse/LangSmith watch the *inside* of an
+  execution (prompts, tokens, spans); fukuro measures the *outside shape* of a loop. Complementary,
+  not competing.
+- **Not a personal delivery dashboard.** DORA-style tools measure teams and pipelines; fukuro
+  measures one harness and its return path.
+- **The CLI is the entry point, not the product.** Vendor-built telemetry will absorb usage/cost/PR
+  counters from below. What fukuro defends is the vocabulary: *what counts as loop improvement* —
+  review rounds, stop lines, interventions, hypothesis lifecycles, return-path attribution.
 
 ## Status
 
