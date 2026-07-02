@@ -50,7 +50,10 @@ Computed by `fukuro report` over a time window:
 - **review rounds / merged PR** — convergence quality; the single best regression detector for
   skill changes
 - **median lead time (open → merge)** — end-to-end friction
-- **ticks / merge** — loop efficiency (wasted polling shows up here)
+- **ticks / merged PR (median)** — per-unit loop efficiency, computed from ticks *attributed to
+  that PR* (wasted polling shows up here). Unattributed ticks are loop-level work (exploration,
+  deciding the next unit) and are reported separately as the window total — mixing the two hides
+  per-unit truth when children run in parallel
 - **stop-line hits** — tree holes and safety pressure
 - **human interventions** — the real autonomy level, measured instead of claimed
 

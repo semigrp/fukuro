@@ -95,6 +95,7 @@ interface MergedPr {
   merged_ts: string;
   review_rounds: number;
   lead_hours: number | null;
+  ticks: number;
 }
 
 function main(): void {
@@ -329,7 +330,7 @@ function report(values: CliValues): void {
     .all(since, ...loopParams) as unknown as { kind: string; n: number }[];
 
   // Per merged PR: review rounds and open→merge lead time.
-  const mergedPrs: MergedPr[] = (
+  const mergedPrsBase = (
     db
       .prepare(
         `SELECT pr,
@@ -341,13 +342,30 @@ function report(values: CliValues): void {
          GROUP BY pr
          HAVING merged_ts IS NOT NULL AND merged_ts >= datetime('now', ?)`,
       )
-      .all(...loopParams, since) as unknown as Omit<MergedPr, 'lead_hours'>[]
+      .all(...loopParams, since) as unknown as Omit<MergedPr, 'lead_hours' | 'ticks'>[]
   ).map((r) => ({
     ...r,
     lead_hours:
       r.opened && r.merged_ts
         ? Math.round(((Date.parse(r.merged_ts) - Date.parse(r.opened)) / 36e5) * 10) / 10
         : null,
+  }));
+
+  // Ticks are attributed per PR (all-time for that PR: its lifecycle may span
+  // windows, but a PR merged in this window owns all of its ticks).
+  const ticksByPr = new Map(
+    (
+      db
+        .prepare(
+          `SELECT pr, COUNT(*) AS n FROM events
+           WHERE kind = 'tick' AND pr IS NOT NULL GROUP BY pr`,
+        )
+        .all() as unknown as { pr: number; n: number }[]
+    ).map((row) => [row.pr, row.n]),
+  );
+  const mergedPrs: MergedPr[] = mergedPrsBase.map((r) => ({
+    ...r,
+    ticks: ticksByPr.get(r.pr) ?? 0,
   }));
 
   const count = (kind: string): number => byKind.find((r) => r.kind === kind)?.n ?? 0;
@@ -363,7 +381,8 @@ function report(values: CliValues): void {
     median_lead_hours: median(
       mergedPrs.map((r) => r.lead_hours).filter((v): v is number => v != null),
     ),
-    ticks_per_merge: merges ? Math.round((count('tick') / merges) * 100) / 100 : null,
+    ticks_per_merged_pr_median: median(mergedPrs.map((r) => r.ticks)),
+    window_ticks: count('tick'),
     stop_line_hits: count('stop_line_hit'),
     stop_lines: stopLines,
     human_interventions: count('human_intervention'),
@@ -415,7 +434,8 @@ type ReportSummary = {
   merged_prs: number;
   review_rounds_per_merged_pr: number | null;
   median_lead_hours: number | null;
-  ticks_per_merge: number | null;
+  ticks_per_merged_pr_median: number | null;
+  window_ticks: number;
   stop_line_hits: number;
   stop_lines: StopLineRow[];
   human_interventions: number;
@@ -440,7 +460,8 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`merged PRs:                ${summary.merged_prs}`);
   lines.push(`review rounds / merged PR: ${summary.review_rounds_per_merged_pr ?? '-'}`);
   lines.push(`median lead time (hours):  ${summary.median_lead_hours ?? '-'}`);
-  lines.push(`ticks / merge:             ${summary.ticks_per_merge ?? '-'}`);
+  lines.push(`ticks / merged PR (median): ${summary.ticks_per_merged_pr_median ?? '-'}`);
+  lines.push(`total ticks (window):      ${summary.window_ticks}`);
   lines.push(`stop-line hits:            ${summary.stop_line_hits}`);
   for (const row of summary.stop_lines) {
     lines.push(`  ${row.n}× ${row.line ?? '(no line recorded)'}`);
@@ -475,7 +496,8 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| merged PRs | ${summary.merged_prs} |`);
   lines.push(`| review rounds / merged PR | ${summary.review_rounds_per_merged_pr ?? '–'} |`);
   lines.push(`| median lead time (hours) | ${summary.median_lead_hours ?? '–'} |`);
-  lines.push(`| ticks / merge | ${summary.ticks_per_merge ?? '–'} |`);
+  lines.push(`| ticks / merged PR (median) | ${summary.ticks_per_merged_pr_median ?? '–'} |`);
+  lines.push(`| total ticks (window) | ${summary.window_ticks} |`);
   lines.push(`| stop-line hits | ${summary.stop_line_hits} |`);
   lines.push(`| human interventions | ${summary.human_interventions} |`);
   lines.push('');
@@ -506,10 +528,10 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push('');
   if (summary.prs.length > 0) {
     lines.push('## Merged PRs', '');
-    lines.push('| PR | review rounds | lead time (h) |');
-    lines.push('|---|---|---|');
+    lines.push('| PR | review rounds | ticks | lead time (h) |');
+    lines.push('|---|---|---|---|');
     for (const pr of summary.prs) {
-      lines.push(`| #${pr.pr} | ${pr.review_rounds} | ${pr.lead_hours ?? '–'} |`);
+      lines.push(`| #${pr.pr} | ${pr.review_rounds} | ${pr.ticks} | ${pr.lead_hours ?? '–'} |`);
     }
     lines.push('');
   }
