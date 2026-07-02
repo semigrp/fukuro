@@ -12,7 +12,7 @@ Generated instance files live in **your** workspace, never in this repository.
 |---|---|---|
 | [bootstrap](bootstrap.md) | ✅ | scan the repo, grill the human for the underivable, generate the local router / loop definition / conventions, verify with one tiny end-to-end loop |
 | [decompose](decompose.md) | ✅ | goal → verifiable DAG: derive from canon+conversation, grill the underivable, tag claims by evidence type, split buildable from blocked, emit a human-readable DAG before filing issues |
-| converge | planned | generic tick discipline parameterized by bootstrap-discovered facts |
+| [converge](converge.md) | ✅ | drive one unit to merged through stateless ticks: re-derive state each tick, one action per tick, gates run bare before every push, escalate to a human instead of improvising |
 | return-path | planned | evaluate → improve → revert-on-regression, adjudicated by `fukuro report` |
 
 Each file is plain markdown with frontmatter: usable directly as a Claude Code `SKILL.md`
