@@ -2,6 +2,7 @@
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { openDb, dbPath, type EventRow } from './db.ts';
+import { deriveContext, suggestedKinds } from './derive.ts';
 
 // Canonical kinds. Unknown kinds are accepted (extensible) but warned about,
 // so typos surface without blocking a running loop.
@@ -31,7 +32,10 @@ const HELP = `fukuro — telemetry for agentic loops (db: ${dbPath()})
 
 Usage:
   fukuro init                              Create the database
-  fukuro log-event <kind> [options]        Append one event
+  fukuro ctx [--json]                      Show the derived context (nothing is stored:
+                                           position is recomputed from git + the event log)
+  fukuro log-event <kind> [options]        Append one event (missing --loop/--issue/--pr
+                                           are filled from the derived context)
   fukuro events [--limit N] [--loop <id>] [--profile private|public] [--json]
                                            Show recent events
   fukuro report [--days N] [--loop <id>] [--profile private|public]
@@ -120,6 +124,8 @@ function main(): void {
   switch (command) {
     case 'init':
       return init();
+    case 'ctx':
+      return showCtx(cli);
     case 'log-event':
     case 'log':
       return logEvent(positionals[1], cli);
@@ -170,6 +176,25 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     }
   }
   const db = openDb();
+
+  // Missing fields are filled from the derived context (explicit flags always win).
+  // loop_start is exempt from loop derivation: an open previous loop must not be
+  // mistaken for the loop being started.
+  const needsDerivation =
+    values.loop === undefined ||
+    values.issue === undefined ||
+    values.pr === undefined;
+  const derived = needsDerivation ? deriveContext(db) : null;
+  const loop =
+    values.loop ?? (kind === 'loop_start' ? null : (derived?.loop ?? null));
+  const issue = toInt('issue', values.issue) ?? derived?.issue ?? null;
+  const pr = toInt('pr', values.pr) ?? derived?.pr ?? null;
+
+  const filled: string[] = [];
+  if (values.loop === undefined && loop !== null) filled.push(`loop=${loop}`);
+  if (values.issue === undefined && issue !== null) filled.push(`issue=#${issue}`);
+  if (values.pr === undefined && pr !== null) filled.push(`pr=#${pr}`);
+
   const result = db
     .prepare(
       `INSERT INTO events (session, loop_id, issue, pr, kind, data)
@@ -177,14 +202,40 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     )
     .run(
       values.session ?? process.env.FUKURO_SESSION ?? null,
-      values.loop ?? null,
-      toInt('issue', values.issue),
-      toInt('pr', values.pr),
+      loop,
+      issue,
+      pr,
       kind,
       data,
     );
   db.close();
-  console.log(`logged #${result.lastInsertRowid} ${kind}`);
+  const derivedNote = filled.length > 0 ? `  (derived: ${filled.join(' ')})` : '';
+  console.log(`logged #${result.lastInsertRowid} ${kind}${derivedNote}`);
+}
+
+function showCtx(values: CliValues): void {
+  const db = openDb();
+  const context = deriveContext(db);
+  db.close();
+  const kinds = suggestedKinds(context);
+  if (values.json) {
+    console.log(JSON.stringify({ ...context, suggested_kinds: kinds }, null, 2));
+    return;
+  }
+  console.log(`project: ${context.project ?? '-'}`);
+  console.log(`branch:  ${context.branch ?? '-'}`);
+  console.log(`issue:   ${context.issue !== null ? `#${context.issue}` : '-'}`);
+  console.log(`pr:      ${context.pr !== null ? `#${context.pr}` : '-'}`);
+  if (context.loop !== null) {
+    console.log(`loop:    ${context.loop}`);
+  } else if (context.openLoops.length > 1) {
+    console.log(`loop:    (ambiguous — open: ${context.openLoops.join(', ')})`);
+  } else {
+    console.log(`loop:    -`);
+  }
+  console.log(`session: ${context.session ?? '-'}`);
+  console.log('');
+  console.log(`suggested kinds here: ${kinds.join(' ')}`);
 }
 
 function listEvents(values: CliValues): void {
