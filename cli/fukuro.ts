@@ -58,6 +58,11 @@ log-event options:
   --pr <n>         Pull request number
   --session <id>   Session id (default: $FUKURO_SESSION)
   --data <json>    JSON payload
+  --id <id>        Sugar for data.id (unit id, e.g. H-1)
+  --claim <text>   Sugar for data.claim (hypothesis claim)
+  --evidence <t>   Sugar for data.evidence (closing evidence)
+  --closes-when <t> Sugar for data.closes_when (closing condition)
+                   Sugar flags merge into --data and win on key conflicts
 
 Canonical kinds:
   ${[...CANONICAL_KINDS].join(' ')}
@@ -69,6 +74,10 @@ interface CliValues {
   pr?: string;
   session?: string;
   data?: string;
+  id?: string;
+  claim?: string;
+  evidence?: string;
+  'closes-when'?: string;
   days: string;
   limit: string;
   json: boolean;
@@ -107,6 +116,10 @@ function main(): void {
       pr: { type: 'string' },
       session: { type: 'string' },
       data: { type: 'string' },
+      id: { type: 'string' },
+      claim: { type: 'string' },
+      evidence: { type: 'string' },
+      'closes-when': { type: 'string' },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -167,14 +180,34 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   if (!CANONICAL_KINDS.has(kind)) {
     console.warn(`warning: "${kind}" is not a canonical kind (accepted anyway)`);
   }
-  let data: string | null = null;
+  let parsed: unknown;
   if (values.data !== undefined) {
     try {
-      data = JSON.stringify(JSON.parse(values.data));
+      parsed = JSON.parse(values.data);
     } catch {
       console.error(`--data is not valid JSON: ${values.data}`);
       process.exit(1);
     }
+  }
+  // Sugar flags merge into the payload (and win on key conflicts) so that
+  // quote-fragile hand-written JSON is never required for the common unit fields.
+  const sugar: Record<string, unknown> = {};
+  if (values.id !== undefined) sugar.id = values.id;
+  if (values.claim !== undefined) sugar.claim = values.claim;
+  if (values.evidence !== undefined) sugar.evidence = values.evidence;
+  if (values['closes-when'] !== undefined) sugar.closes_when = values['closes-when'];
+  let data: string | null = null;
+  if (Object.keys(sugar).length > 0) {
+    if (
+      parsed !== undefined &&
+      (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+    ) {
+      console.error('--data must be a JSON object when combined with sugar flags');
+      process.exit(1);
+    }
+    data = JSON.stringify({ ...((parsed as Record<string, unknown>) ?? {}), ...sugar });
+  } else if (parsed !== undefined) {
+    data = JSON.stringify(parsed);
   }
   const db = openDb();
 

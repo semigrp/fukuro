@@ -83,9 +83,11 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
 
 ## Status
 
-Early. The spec chapters are drafted; the CLI covers `init` / `log-event` / `events` / `report`.
-Roadmap: skill templates, state-backend adapters, a GitHub-only example loop, and outcome-based
-baseline guards for the return path.
+Early. The spec chapters are drafted; the CLI covers `init` / `ctx` / `log-event` / `events` /
+`report` — including stateless context derivation (position recomputed from git and the event
+log; nothing stored), structural redaction (`--profile public`), and hook recipes
+([`docs/hooks.md`](docs/hooks.md)). Roadmap: skill templates, state-backend adapters, a
+GitHub-only example loop, and outcome-based baseline guards for the return path.
 
 ## License
 
