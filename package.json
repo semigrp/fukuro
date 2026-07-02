@@ -1,0 +1,40 @@
+{
+  "name": "fukuro",
+  "version": "0.1.0",
+  "description": "Telemetry-first foundation for agentic loop engineering: decision-tree routing × DAG decomposition × convergence loops, plus a self-improving return path (fukuro / 復路).",
+  "type": "module",
+  "bin": {
+    "fukuro": "./cli/fukuro.ts"
+  },
+  "files": [
+    "cli",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test cli/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/semigrp/fukuro.git"
+  },
+  "keywords": [
+    "ai-agents",
+    "loop-engineering",
+    "harness-engineering",
+    "telemetry",
+    "sqlite",
+    "claude-code",
+    "codex"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3"
+  }
+}
