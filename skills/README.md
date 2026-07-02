@@ -1,13 +1,20 @@
-# skills/ — generic skill templates (WIP)
+# skills/ — meta-skills: generators, not procedures
 
-Structural templates for the routing tree (spec/01) and convergence loops (spec/03), stripped of
-any host-specific context. Planned:
+Concrete procedural skills are context-bound *by design* — a good one names its own reviewers,
+gates, and conventions. Shipping one team's procedures would hand every cloner a copy of someone
+else's context. So fukuro ships the layer above: **meta-skills that generate your instance skills
+from your environment.** Derive-don't-store, applied to procedures.
 
-- `orchestrator.md` — L1 root launcher template (trigger table + branch links only)
-- `goal.md` — decomposition entry: goal → parent plan + child units + dependency graph
-- `implement.md` — convergence loop definition: tick logic, gates, stop lines, pacing
-- `evaluate.md` — rubric template with a parameterized *host-context binding* axis
-- `meta-improve.md` — return-path cycle: collect → select one → apply → verify baseline
+Clone → `npm i -g fukuro` → point your agent at a meta-skill → your own tree grows locally.
+Generated instance files live in **your** workspace, never in this repository.
 
-Each template will ship in two generated flavors from one source: `SKILL.md` (Claude Code) and
-`AGENTS.md` (Codex), so the same tree runs on either agent.
+| meta-skill | status | what it does |
+|---|---|---|
+| [bootstrap](bootstrap.md) | ✅ | scan the repo, grill the human for the underivable, generate the local router / loop definition / conventions, verify with one tiny end-to-end loop |
+| decompose | planned | generic decomposition rules (parent=plan, child=one verifiable unit, size budget, approval gate) applied to a runtime goal |
+| converge | planned | generic tick discipline parameterized by bootstrap-discovered facts |
+| return-path | planned | evaluate → improve → revert-on-regression, adjudicated by `fukuro report` |
+
+Each file is plain markdown with frontmatter: usable directly as a Claude Code `SKILL.md`
+(copy/symlink into `.claude/skills/<name>/SKILL.md`) or referenced from an `AGENTS.md`. One
+source, any agent.
