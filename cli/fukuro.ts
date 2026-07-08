@@ -108,7 +108,15 @@ interface MergedPr {
 }
 
 function main(): void {
-  const { values, positionals } = parseArgs({
+  const argv = process.argv.slice(2);
+  // Conventional help flags, handled before parseArgs (strict mode would
+  // otherwise throw ERR_PARSE_ARGS_UNKNOWN_OPTION with a raw stack trace).
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(HELP);
+    return;
+  }
+  const parseArgsConfig = {
+    args: argv,
     allowPositionals: true,
     options: {
       loop: { type: 'string' },
@@ -127,7 +135,16 @@ function main(): void {
       out: { type: 'string' },
       profile: { type: 'string', default: 'private' },
     },
-  });
+  } as const;
+  let parsed: ReturnType<typeof parseArgs<typeof parseArgsConfig>>;
+  try {
+    parsed = parseArgs(parseArgsConfig);
+  } catch (error) {
+    // Unknown flags etc.: fail with one friendly line, not a stack trace.
+    console.error(`fukuro: ${error instanceof Error ? error.message : String(error)} (run: fukuro help)`);
+    process.exit(2);
+  }
+  const { values, positionals } = parsed;
   const cli = values as CliValues;
   if (cli.profile !== 'private' && cli.profile !== 'public') {
     console.error(`--profile must be "private" or "public", got: ${cli.profile}`);

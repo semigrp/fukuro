@@ -214,3 +214,19 @@ test('events --loop filters to one loop', () => {
   const rows = JSON.parse(output) as { loop_id: string }[];
   assert.ok(rows.length === 2 && rows.every((row) => row.loop_id === 'A'));
 });
+
+test('--help / -h print help; unknown flags fail with one line, not a stack trace', () => {
+  const cli = makeCli();
+  assert.ok(cli.run('--help').includes('fukuro — telemetry for agentic loops'));
+  assert.ok(cli.run('-h').includes('Usage:'));
+  try {
+    cli.run('--no-such-flag');
+    assert.fail('expected a non-zero exit for an unknown flag');
+  } catch (error) {
+    const e = error as { status?: number; stderr?: Buffer };
+    assert.equal(e.status, 2);
+    const stderr = e.stderr?.toString() ?? '';
+    assert.ok(stderr.startsWith('fukuro:'), `stderr should be a friendly one-liner, got: ${stderr}`);
+    assert.ok(!/\n\s+at /.test(stderr), 'stderr must not contain a stack trace');
+  }
+});
