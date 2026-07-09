@@ -335,6 +335,12 @@ function listEvents(values: CliValues): void {
   }
 }
 
+// Attribution expectations, read-time only: an event of these kinds logged
+// without pr/issue is invisible to the per-PR/per-issue aggregations, so the
+// report measures its own measurement quality instead of silently under-reporting.
+const PR_SCOPED_KINDS = ['tick', 'pr_opened', 'review_round', 'merged'];
+const ISSUE_SCOPED_KINDS = ['loop_start', 'issue_closed'];
+
 function report(values: CliValues): void {
   const days = toInt('days', values.days) ?? 7;
   const since = `-${days} days`;
@@ -426,6 +432,45 @@ function report(values: CliValues): void {
     ticks: ticksByPr.get(r.pr) ?? 0,
   }));
 
+  // Attribution coverage over the window. SUM(...) over zero rows is NULL,
+  // hence the ratio() null handling.
+  const ratio = (part: number | null, total: number): number | null =>
+    total === 0 ? null : Math.round(((part ?? 0) / total) * 100) / 100;
+  const windowTotals = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(session IS NOT NULL) AS with_session,
+              SUM(loop_id IS NOT NULL) AS with_loop
+       FROM events WHERE ts >= datetime('now', ?)${loopClause}`,
+    )
+    .get(since, ...loopParams) as unknown as {
+    total: number;
+    with_session: number | null;
+    with_loop: number | null;
+  };
+  const scoped = (kinds: string[], column: 'pr' | 'issue') =>
+    db
+      .prepare(
+        `SELECT COUNT(*) AS total, SUM(${column} IS NOT NULL) AS with_field
+         FROM events
+         WHERE kind IN (${kinds.map(() => '?').join(',')})
+           AND ts >= datetime('now', ?)${loopClause}`,
+      )
+      .get(...kinds, since, ...loopParams) as unknown as {
+      total: number;
+      with_field: number | null;
+    };
+  const prScoped = scoped(PR_SCOPED_KINDS, 'pr');
+  const issueScoped = scoped(ISSUE_SCOPED_KINDS, 'issue');
+  const unattributedTicks = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM events
+         WHERE kind = 'tick' AND pr IS NULL AND ts >= datetime('now', ?)${loopClause}`,
+      )
+      .get(since, ...loopParams) as unknown as { n: number }
+  ).n;
+
   const count = (kind: string): number => byKind.find((r) => r.kind === kind)?.n ?? 0;
   const merges = mergedPrs.length;
   const fullSummary = {
@@ -441,9 +486,16 @@ function report(values: CliValues): void {
     ),
     ticks_per_merged_pr_median: median(mergedPrs.map((r) => r.ticks)),
     window_ticks: count('tick'),
+    unattributed_ticks: unattributedTicks,
     stop_line_hits: count('stop_line_hit'),
     stop_lines: stopLines,
     human_interventions: count('human_intervention'),
+    attribution_coverage: {
+      session: ratio(windowTotals.with_session, windowTotals.total),
+      loop_id: ratio(windowTotals.with_loop, windowTotals.total),
+      pr_scoped_pr: ratio(prScoped.with_field, prScoped.total),
+      issue_scoped_issue: ratio(issueScoped.with_field, issueScoped.total),
+    },
     hypotheses: {
       opened_in_window: count('hypothesis_opened'),
       confirmed_in_window: count('hypothesis_confirmed'),
@@ -494,9 +546,16 @@ type ReportSummary = {
   median_lead_hours: number | null;
   ticks_per_merged_pr_median: number | null;
   window_ticks: number;
+  unattributed_ticks: number;
   stop_line_hits: number;
   stop_lines: StopLineRow[];
   human_interventions: number;
+  attribution_coverage: {
+    session: number | null;
+    loop_id: number | null;
+    pr_scoped_pr: number | null;
+    issue_scoped_issue: number | null;
+  };
   hypotheses: {
     opened_in_window: number;
     confirmed_in_window: number;
@@ -506,6 +565,21 @@ type ReportSummary = {
   };
   prs: MergedPr[];
 };
+
+/**
+ * Ticks legitimately precede pr_opened, so a minority without pr is normal.
+ * Once half or more of the window's ticks carry no pr, the per-PR tick stats
+ * are built on a minority sample — say so instead of quietly under-reporting.
+ */
+function tickWarning(summary: ReportSummary): string | null {
+  const { unattributed_ticks: n, window_ticks: total } = summary;
+  if (total === 0 || n / total < 0.5) return null;
+  return `${n} of ${total} ticks in this window have no pr; per-PR tick stats are unreliable`;
+}
+
+function pct(value: number | null): string {
+  return value === null ? '-' : `${Math.round(value * 100)}%`;
+}
 
 function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
   const lines: string[] = [];
@@ -520,11 +594,20 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`median lead time (hours):  ${summary.median_lead_hours ?? '-'}`);
   lines.push(`ticks / merged PR (median): ${summary.ticks_per_merged_pr_median ?? '-'}`);
   lines.push(`total ticks (window):      ${summary.window_ticks}`);
+  const warn = tickWarning(summary);
+  if (warn) lines.push(`warn: ${warn}`);
   lines.push(`stop-line hits:            ${summary.stop_line_hits}`);
   for (const row of summary.stop_lines) {
     lines.push(`  ${row.n}× ${row.line ?? '(no line recorded)'}`);
   }
   lines.push(`human interventions:       ${summary.human_interventions}`);
+  const c = summary.attribution_coverage;
+  lines.push('');
+  lines.push('attribution coverage:');
+  lines.push(`  events with session:            ${pct(c.session)}`);
+  lines.push(`  events with loop:               ${pct(c.loop_id)}`);
+  lines.push(`  PR-scoped events with pr:       ${pct(c.pr_scoped_pr)}`);
+  lines.push(`  issue-scoped events with issue: ${pct(c.issue_scoped_issue)}`);
   const h = summary.hypotheses;
   lines.push('');
   lines.push(
@@ -558,6 +641,17 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| total ticks (window) | ${summary.window_ticks} |`);
   lines.push(`| stop-line hits | ${summary.stop_line_hits} |`);
   lines.push(`| human interventions | ${summary.human_interventions} |`);
+  lines.push('');
+  const warn = tickWarning(summary);
+  if (warn) lines.push(`> ⚠ ${warn}`, '');
+  const c = summary.attribution_coverage;
+  lines.push('## Attribution coverage', '');
+  lines.push('| field | coverage |');
+  lines.push('|---|---|');
+  lines.push(`| events with session | ${pct(c.session)} |`);
+  lines.push(`| events with loop | ${pct(c.loop_id)} |`);
+  lines.push(`| PR-scoped events with pr | ${pct(c.pr_scoped_pr)} |`);
+  lines.push(`| issue-scoped events with issue | ${pct(c.issue_scoped_issue)} |`);
   lines.push('');
   if (summary.stop_lines.length > 0) {
     lines.push('## Stop lines hit', '');

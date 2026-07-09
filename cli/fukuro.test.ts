@@ -205,6 +205,80 @@ test('--profile public leaks no identifiers or free text in any format', () => {
   assert.equal(summary.hypotheses.open.length, 0);
 });
 
+type Coverage = {
+  session: number | null;
+  loop_id: number | null;
+  pr_scoped_pr: number | null;
+  issue_scoped_issue: number | null;
+};
+type CoverageSummary = { unattributed_ticks: number; attribution_coverage: Coverage };
+
+test('report: coverage ratios and warning when most ticks lack pr', () => {
+  const cli = makeCli();
+  const db = new DatabaseSync(cli.dbFile);
+  db.exec(schema);
+  const insert = db.prepare(
+    'INSERT INTO events (session, loop_id, issue, pr, kind, data) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  insert.run('s1', 'L', 7, null, 'loop_start', null);
+  insert.run('s1', 'L', null, 9, 'tick', null);
+  insert.run(null, null, null, null, 'tick', null);
+  insert.run(null, 'L', null, null, 'tick', null);
+  insert.run('s1', 'L', 7, 9, 'merged', null);
+  db.close();
+
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
+  assert.equal(summary.unattributed_ticks, 2);
+  assert.deepEqual(summary.attribution_coverage, {
+    session: 0.6, // 3 of 5 events
+    loop_id: 0.8, // 4 of 5 events
+    pr_scoped_pr: 0.5, // 3 ticks + merged, pr on 2
+    issue_scoped_issue: 1, // loop_start carries issue
+  });
+  const text = cli.run('report');
+  assert.ok(text.includes('warn: 2 of 3 ticks in this window have no pr'));
+  assert.ok(text.includes('attribution coverage:'));
+  assert.ok(cli.run('report', '--format', 'md').includes('## Attribution coverage'));
+});
+
+test('report: fully attributed window has full coverage and no warning', () => {
+  const cli = makeCli();
+  cli.runEnv({ FUKURO_SESSION: 's' }, 'log-event', 'loop_start', '--loop', 'L', '--issue', '1');
+  cli.runEnv({ FUKURO_SESSION: 's' }, 'log-event', 'tick', '--loop', 'L', '--pr', '2');
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
+  assert.equal(summary.unattributed_ticks, 0);
+  assert.deepEqual(summary.attribution_coverage, {
+    session: 1,
+    loop_id: 1,
+    pr_scoped_pr: 1,
+    issue_scoped_issue: 1,
+  });
+  assert.ok(!cli.run('report').includes('warn:'));
+});
+
+test('report: coverage is null when there are no relevant events', () => {
+  const cli = makeCli();
+  cli.run('init');
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
+  assert.equal(summary.unattributed_ticks, 0);
+  assert.deepEqual(summary.attribution_coverage, {
+    session: null,
+    loop_id: null,
+    pr_scoped_pr: null,
+    issue_scoped_issue: null,
+  });
+});
+
+test('report: public profile keeps coverage aggregates', () => {
+  const cli = makeCli();
+  seedMergedPr(cli.dbFile);
+  const summary = JSON.parse(
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+  ) as CoverageSummary;
+  assert.equal(typeof summary.unattributed_ticks, 'number');
+  assert.equal(typeof summary.attribution_coverage.session, 'number');
+});
+
 test('events --loop filters to one loop', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'A');
