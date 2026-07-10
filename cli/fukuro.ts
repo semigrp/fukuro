@@ -608,9 +608,12 @@ type LintCheck = (db: ReturnType<typeof openDb>) => LintFinding[];
 const LINT_CHECKS: LintCheck[] = [
   // orphan-lifecycle: a hypothesis close whose (loop_id, data.id) was never
   // opened earlier. The claim text only lives in the opened payload, so the
-  // close is evidence for a claim the db never recorded. NULL-safe loop match
-  // (IS) keeps loop-less events comparable; a close without data.id can never
-  // match an opened and is flagged too.
+  // close is evidence for a claim the db never recorded. "Earlier" is event
+  // time (ts, id as tiebreak), not row id: in an append-only log a backfilled
+  // opened necessarily has id order ≠ time order (#29). An opened that declares
+  // data.backfill satisfies the close regardless of either order. NULL-safe
+  // loop match (IS) keeps loop-less events comparable; a close without data.id
+  // can never match an opened and is flagged too.
   function orphanLifecycle(db) {
     const rows = db
       .prepare(
@@ -619,9 +622,11 @@ const LINT_CHECKS: LintCheck[] = [
          WHERE e.kind IN ('hypothesis_confirmed','hypothesis_refuted')
            AND NOT EXISTS (
              SELECT 1 FROM events o
-             WHERE o.kind = 'hypothesis_opened' AND o.id < e.id
+             WHERE o.kind = 'hypothesis_opened'
                AND o.loop_id IS e.loop_id
                AND json_extract(o.data,'$.id') = json_extract(e.data,'$.id')
+               AND (o.ts < e.ts OR (o.ts = e.ts AND o.id < e.id)
+                    OR json_extract(o.data,'$.backfill'))
            )
          ORDER BY e.id`,
       )
@@ -631,15 +636,21 @@ const LINT_CHECKS: LintCheck[] = [
       severity: 'warn' as const,
       message:
         `event #${r.id} ${r.kind} (id=${r.hid ?? 'missing'}, loop=${r.loop_id ?? '-'}) has no prior hypothesis_opened — ` +
-        `backfill: fukuro log-event hypothesis_opened --loop ${r.loop_id ?? '<loop>'} --id ${r.hid ?? '<id>'} --claim "..."`,
+        `backfill: fukuro log-event hypothesis_opened --loop ${r.loop_id ?? '<loop>'} --id ${r.hid ?? '<id>'} --claim "..." --data '{"backfill":true}'`,
     }));
   },
   // unbalanced-loop: more ends than starts for one loop_id — a double-close,
-  // or an end logged against a loop that was never started.
+  // or an end logged against a loop that was never started. An end that
+  // declares itself a correction (data.supersedes: <event id> or
+  // data.re_record: true, #29) is excluded from the count: re-recording a
+  // mis-timed close with new rows is the append-only way to fix history.
   function unbalancedLoop(db) {
     const rows = db
       .prepare(
-        `SELECT loop_id, SUM(kind = 'loop_start') AS starts, SUM(kind = 'loop_end') AS ends
+        `SELECT loop_id, SUM(kind = 'loop_start') AS starts,
+                SUM(kind = 'loop_end'
+                    AND json_extract(data,'$.supersedes') IS NULL
+                    AND NOT COALESCE(json_extract(data,'$.re_record'), 0)) AS ends
          FROM events
          WHERE loop_id IS NOT NULL AND kind IN ('loop_start','loop_end')
          GROUP BY loop_id HAVING ends > starts ORDER BY loop_id`,
@@ -648,7 +659,9 @@ const LINT_CHECKS: LintCheck[] = [
     return rows.map((r) => ({
       check: 'unbalanced-loop',
       severity: 'warn' as const,
-      message: `loop ${r.loop_id} has ${r.ends} loop_end but only ${r.starts} loop_start — double-close or missing loop_start`,
+      message:
+        `loop ${r.loop_id} has ${r.ends} loop_end but only ${r.starts} loop_start — double-close or missing loop_start ` +
+        `(a deliberate re-record should declare data.supersedes or data.re_record)`,
     }));
   },
   // ambiguous-hypothesis-id: the same id opened in more than one loop. Existing

@@ -48,6 +48,49 @@ many commits or thread replies it contains. Fix-up pushes for mistakes the loop 
 while responding (a broken gate run, a formatting miss) belong to the same round — the metric
 counts reviewer-driven iterations, not raw pushes.
 
+## Correcting the append-only log
+
+Mistakes happen inside the store's own invariant: rows are never edited or deleted, so a wrong or
+mis-timed event is corrected by *appending* a new row that declares what it corrects. Two
+canonical markers carry that declaration, and every consumer (lint first, any future aggregation)
+must honor them:
+
+- **`data.backfill: true`** — this row records something that happened earlier and was written
+  down late, usually with a historical `ts`. Ordering-sensitive checks treat a backfilled
+  `hypothesis_opened` as prior to its close even when its row id (insertion order) is higher.
+  Time order is judged by `ts` (row id only breaks ties); the marker covers the remaining case
+  where the backfill kept a current `ts`.
+- **`data.supersedes: <event id>`** or **`data.re_record: true`** — this row replaces an earlier
+  event of the same kind (e.g. a `loop_end` re-recorded because the first one fired too early).
+  Count-based checks exclude a superseding row from their tally: the declared re-record is the
+  correction, not a second occurrence. `supersedes` names the exact row and is preferred;
+  `re_record` is the anonymous form for when the original id is not at hand.
+
+An unmarked duplicate or an unmarked out-of-order close remains a lint warning — the markers are
+what distinguish "adjudicated: intentional" from "defect". History stays complete either way: the
+superseded row is still there, and the correction is itself an event with a timestamp.
+
+## The entity directory contract
+
+`$FUKURO_ONTOLOGY` (opt-in, unset by default) points at a plain-markdown directory the *user*
+owns — fukuro validates references into it and writes nothing. The contract is deliberately
+minimal:
+
+- **Layout:** one subdirectory per entity type — `loop/`, `hypothesis/`, `stop-line/` — and one
+  `<slug>.md` file per entity. A missing subdirectory simply means no entities of that type.
+- **Resolution:** a `loop_id` resolves against `loop/<loop_id>.md`. A hypothesis id resolves via,
+  in order: its lowercased slug (`hypothesis/<id>.md`), a loop-prefixed slug
+  (`hypothesis/<loop>-<id>.md`, for existing data where ids collide across loops), or a
+  frontmatter `id:` line in any hypothesis file. A stop line resolves against frontmatter
+  `line: <text>` or a `lines:` list entry in any `stop-line/*.md`.
+- **Accept-then-warn:** telemetry writes are never refused over an unresolved reference.
+  `log-event` appends first, then warns with the slug to create; `lint` reports distinct unknown
+  references across the whole log. The moment an entity is first referenced is exactly the moment
+  to create it — blocking the write would punish the behavior the check exists to encourage.
+- **No further schema.** Beyond directory-per-type and one-file-per-entity, the files' content,
+  frontmatter, and organization belong to the ontology's owner. fukuro greps the few lines above
+  and imposes nothing else.
+
 ## Core KPIs
 
 Computed by `fukuro report` over a time window:

@@ -414,6 +414,51 @@ test('lint: same hypothesis id across loops is info only and exit 0', () => {
   assert.equal(json.findings[0]?.check, 'ambiguous-hypothesis-id');
 });
 
+test('lint: lifecycle order is event time, not row id — a backfilled opened with historical ts resolves', () => {
+  const cli = makeCli();
+  const db = new DatabaseSync(cli.dbFile);
+  db.exec(schema);
+  const insert = db.prepare('INSERT INTO events (ts, loop_id, kind, data) VALUES (?, ?, ?, ?)');
+  const at = (minutesAgo: number): string =>
+    new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  // the close is written first (lower row id); the opened is backfilled later
+  // with a historical ts — id order and time order deliberately disagree
+  insert.run(at(10), 'L', 'hypothesis_confirmed', JSON.stringify({ id: 'H-1' }));
+  insert.run(at(60), 'L', 'hypothesis_opened', JSON.stringify({ id: 'H-1', claim: 'c' }));
+  db.close();
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('lint: no findings'));
+});
+
+test('lint: data.backfill satisfies a close even when the opened is later by both id and ts', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'hypothesis_refuted', '--loop', 'L', '--id', 'H-9');
+  cli.run('log-event', 'hypothesis_opened', '--loop', 'L', '--id', 'H-9', '--claim', 'late', '--data', '{"backfill":true}');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('lint: no findings'));
+});
+
+test('lint: a loop_end declaring supersedes/re_record is a correction, not a double-close', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  cli.run('log-event', 'loop_end', '--loop', 'L'); // fired too early
+  cli.run('log-event', 'loop_end', '--loop', 'L', '--data', '{"supersedes":2}');
+  cli.run('log-event', 'loop_start', '--loop', 'M');
+  cli.run('log-event', 'loop_end', '--loop', 'M');
+  cli.run('log-event', 'loop_end', '--loop', 'M', '--data', '{"re_record":true}');
+  // an unmarked duplicate still warns
+  cli.run('log-event', 'loop_start', '--loop', 'N');
+  cli.run('log-event', 'loop_end', '--loop', 'N');
+  cli.run('log-event', 'loop_end', '--loop', 'N');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 1);
+  assert.ok(!res.stdout.includes('loop L') && !res.stdout.includes('loop M'));
+  assert.ok(res.stdout.includes('warn [unbalanced-loop] loop N has 2 loop_end but only 1 loop_start'));
+  assert.ok(res.stdout.includes('lint: 1 warning(s), 0 info'));
+});
+
 test('report: improve_applied signal coverage (anti-slop KPI)', () => {
   const cli = makeCli();
   cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"target":"x","signal":"finding#1"}');
