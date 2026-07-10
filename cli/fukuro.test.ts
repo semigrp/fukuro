@@ -346,6 +346,59 @@ test('hoot: above the candidate cap it degrades to a warning; zero candidates st
   assert.ok(!silent.stderr.includes('hoot'), 'nothing derivable, nothing to ask');
 });
 
+test('open ledger: stale vs active vs closed vs reopened, across all three pairs', () => {
+  const cli = makeCli();
+  const db = new DatabaseSync(cli.dbFile);
+  db.exec(schema);
+  const insert = db.prepare(
+    'INSERT INTO events (ts, loop_id, issue, pr, kind, data) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const daysAgo = (n: number): string => new Date(Date.now() - n * 86400e3).toISOString();
+  insert.run(daysAgo(10), 'forgotten', null, null, 'loop_start', null); // open, silent 10d
+  insert.run(daysAgo(10), 'done', null, null, 'loop_start', null);
+  insert.run(daysAgo(9), 'done', null, null, 'loop_end', null); // closed
+  insert.run(daysAgo(8), 'revived', null, null, 'loop_start', null);
+  insert.run(daysAgo(8), 'revived', null, null, 'loop_end', null);
+  insert.run(daysAgo(1), 'revived', null, null, 'loop_start', null); // reopened, active
+  insert.run(daysAgo(6), 'work', null, 6, 'pr_opened', null); // open pr, silent 6d
+  insert.run(daysAgo(4), 'work', null, 7, 'pr_opened', null);
+  insert.run(daysAgo(4), 'work', null, 7, 'merged', null); // closed pr
+  insert.run(daysAgo(20), 'work', null, null, 'hypothesis_opened', JSON.stringify({ id: 'H-9' }));
+  db.close();
+
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as {
+    open_ledger: { pair: string; scope: string; silent_days: number; stale: boolean }[];
+  };
+  const entry = Object.fromEntries(summary.open_ledger.map((e) => [`${e.pair}:${e.scope}`, e]));
+  assert.equal(entry['loop:forgotten']?.stale, true);
+  assert.ok(!('loop:done' in entry), 'a closed pair must not appear');
+  assert.equal(entry['loop:revived']?.stale, false, 'reopened and recently active');
+  assert.equal(entry['pr:6']?.stale, true);
+  assert.ok(!('pr:7' in entry), 'a merged pr must not appear');
+  assert.equal(entry['hypothesis:H-9']?.stale, true);
+
+  // ctx surfaces only the stale ones
+  const ctx = cli.run('ctx');
+  assert.ok(ctx.includes('stale obligations:') && ctx.includes('forgotten'));
+  assert.ok(!/stale obligations:[\s\S]*revived/.test(ctx));
+
+  // starting a new loop nudges about stale siblings, on stderr, without blocking
+  const started = spawnCli(cli, 'log-event', 'loop_start', '--loop', 'fresh');
+  assert.equal(started.status, 0);
+  assert.ok(started.stderr.includes('hoot:') && started.stderr.includes('forgotten'));
+});
+
+test('open ledger: public profile redacts scopes but keeps ages', () => {
+  const cli = makeCli();
+  seedMergedPr(cli.dbFile); // leaves demo-loop open
+  const summary = JSON.parse(
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+  ) as { open_ledger: { pair: string; scope: string; silent_days: number }[] };
+  assert.ok(summary.open_ledger.length > 0);
+  assert.ok(summary.open_ledger.every((e) => e.scope === '(redacted)'));
+  assert.ok(summary.open_ledger.every((e) => typeof e.silent_days === 'number'));
+});
+
 test('events --loop filters to one loop', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'A');

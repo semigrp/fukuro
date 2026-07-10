@@ -307,18 +307,33 @@ function logEvent(kind: string | undefined, values: CliValues): void {
       kind,
       data,
     );
+  // Write-time nudge on the hoot channel: starting a loop is the natural
+  // moment to notice siblings that were never closed. The loop just started
+  // has fresh activity, so it can never appear in its own nudge.
+  const staleLoops =
+    kind === 'loop_start' ? deriveLedger(db).filter((e) => e.pair === 'loop' && e.stale) : [];
   db.close();
   const derivedNote = filled.length > 0 ? `  (derived: ${filled.join(' ')})` : '';
   console.log(`logged #${result.lastInsertRowid} ${kind}${derivedNote}`);
+  if (staleLoops.length > 0) {
+    console.warn(
+      `hoot: ${staleLoops.length} stale open loop(s): ${staleLoops
+        .map((e) => `${e.scope} (${e.silent_days}d)`)
+        .join(', ')} — close with loop_end or log to revive`,
+    );
+  }
 }
 
 function showCtx(values: CliValues): void {
   const db = openDb();
   const context = deriveContext(db);
+  const ledger = deriveLedger(db);
   db.close();
   const kinds = suggestedKinds(context);
   if (values.json) {
-    console.log(JSON.stringify({ ...context, suggested_kinds: kinds }, null, 2));
+    console.log(
+      JSON.stringify({ ...context, suggested_kinds: kinds, open_ledger: ledger }, null, 2),
+    );
     return;
   }
   console.log(`project: ${context.project ?? '-'}`);
@@ -335,6 +350,15 @@ function showCtx(values: CliValues): void {
   console.log(`session: ${context.session ?? '-'}`);
   console.log('');
   console.log(`suggested kinds here: ${kinds.join(' ')}`);
+  // ctx stays lean: only obligations that look forgotten, not everything open.
+  const staleEntries = ledger.filter((e) => e.stale);
+  if (staleEntries.length > 0) {
+    console.log('');
+    console.log('stale obligations:');
+    for (const e of staleEntries) {
+      console.log(`  [${e.pair}] ${e.scope} — silent ${e.silent_days}d`);
+    }
+  }
 }
 
 function listEvents(values: CliValues): void {
@@ -382,6 +406,69 @@ const PR_SCOPED_KINDS = ['tick', 'pr_opened', 'review_round', 'merged'];
 const ISSUE_SCOPED_KINDS = ['loop_start', 'issue_closed'];
 // Above this many open-PR candidates, hoot stops enumerating and only warns.
 const HOOT_CANDIDATE_CAP = 5;
+
+// Open-ledger pair rules (derive, don't store): an opening kind creates an
+// obligation that only its closing kinds discharge. Rules are data — adding a
+// pair needs no new query code. Staleness is measured from the scope's last
+// activity of ANY kind, which separates "open and active" from "probably
+// forgotten"; the ledger only surfaces, it never closes anything.
+const PAIR_RULES = [
+  { pair: 'loop', opened: 'loop_start', closedBy: ['loop_end'], scopeExpr: 'loop_id', staleAfterDays: 5 },
+  { pair: 'pr', opened: 'pr_opened', closedBy: ['merged'], scopeExpr: 'pr', staleAfterDays: 3 },
+  {
+    pair: 'hypothesis',
+    opened: 'hypothesis_opened',
+    closedBy: ['hypothesis_confirmed', 'hypothesis_refuted'],
+    scopeExpr: "json_extract(data,'$.id')",
+    staleAfterDays: 14,
+  },
+];
+
+interface LedgerEntry {
+  pair: string;
+  scope: string;
+  opened_at: string;
+  last_activity: string;
+  silent_days: number;
+  stale: boolean;
+}
+
+function deriveLedger(db: ReturnType<typeof openDb>): LedgerEntry[] {
+  const entries: LedgerEntry[] = [];
+  for (const rule of PAIR_RULES) {
+    const rows = db
+      .prepare(
+        // A scope is open when its latest opening event is more recent than its
+        // latest closing event (so a reopened scope counts as open again).
+        `SELECT scope,
+                MIN(CASE WHEN kind = ? THEN ts END) AS opened_at,
+                MAX(ts) AS last_activity
+         FROM (SELECT ${rule.scopeExpr} AS scope, kind, ts, id FROM events
+               WHERE ${rule.scopeExpr} IS NOT NULL)
+         GROUP BY scope
+         HAVING MAX(CASE WHEN kind = ? THEN id END)
+                > COALESCE(MAX(CASE WHEN kind IN (${rule.closedBy.map(() => '?').join(',')}) THEN id END), 0)`,
+      )
+      .all(rule.opened, rule.opened, ...rule.closedBy) as unknown as {
+      scope: string | number;
+      opened_at: string;
+      last_activity: string;
+    }[];
+    for (const row of rows) {
+      const silentDays =
+        Math.round(((Date.now() - Date.parse(row.last_activity)) / 86400e3) * 10) / 10;
+      entries.push({
+        pair: rule.pair,
+        scope: String(row.scope),
+        opened_at: row.opened_at,
+        last_activity: row.last_activity,
+        silent_days: silentDays,
+        stale: silentDays >= rule.staleAfterDays,
+      });
+    }
+  }
+  return entries;
+}
 
 function report(values: CliValues): void {
   const days = toInt('days', values.days) ?? 7;
@@ -543,6 +630,9 @@ function report(values: CliValues): void {
       pr_scoped_pr: ratio(prScoped.with_field, prScoped.total),
       issue_scoped_issue: ratio(issueScoped.with_field, issueScoped.total),
     },
+    // The ledger is all-time, like open hypotheses: an obligation opened last
+    // month and never discharged is exactly what the report must surface.
+    open_ledger: deriveLedger(db),
     hypotheses: {
       opened_in_window: count('hypothesis_opened'),
       confirmed_in_window: count('hypothesis_confirmed'),
@@ -563,6 +653,7 @@ function report(values: CliValues): void {
           loop: fullSummary.loop === null ? null : '(redacted)',
           stop_lines: [],
           hypotheses: { ...fullSummary.hypotheses, open: [] },
+          open_ledger: fullSummary.open_ledger.map((e) => ({ ...e, scope: '(redacted)' })),
           prs: [],
         }
       : fullSummary;
@@ -603,6 +694,7 @@ type ReportSummary = {
     pr_scoped_pr: number | null;
     issue_scoped_issue: number | null;
   };
+  open_ledger: LedgerEntry[];
   hypotheses: {
     opened_in_window: number;
     confirmed_in_window: number;
@@ -655,6 +747,16 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`  events with loop:               ${pct(c.loop_id)}`);
   lines.push(`  PR-scoped events with pr:       ${pct(c.pr_scoped_pr)}`);
   lines.push(`  issue-scoped events with issue: ${pct(c.issue_scoped_issue)}`);
+  if (summary.open_ledger.length > 0) {
+    const stale = summary.open_ledger.filter((e) => e.stale).length;
+    lines.push('');
+    lines.push(`open ledger:               ${summary.open_ledger.length} open / ${stale} stale`);
+    for (const e of summary.open_ledger) {
+      lines.push(
+        `  [${e.pair}] ${e.scope} — opened ${e.opened_at.slice(0, 10)}, silent ${e.silent_days}d${e.stale ? ' (stale)' : ''}`,
+      );
+    }
+  }
   const h = summary.hypotheses;
   lines.push('');
   lines.push(
@@ -700,6 +802,17 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| PR-scoped events with pr | ${pct(c.pr_scoped_pr)} |`);
   lines.push(`| issue-scoped events with issue | ${pct(c.issue_scoped_issue)} |`);
   lines.push('');
+  if (summary.open_ledger.length > 0) {
+    lines.push('## Open ledger', '');
+    lines.push('| pair | scope | opened | silent (days) | stale |');
+    lines.push('|---|---|---|---|---|');
+    for (const e of summary.open_ledger) {
+      lines.push(
+        `| ${e.pair} | ${e.scope} | ${e.opened_at.slice(0, 10)} | ${e.silent_days} | ${e.stale ? '⚠' : ''} |`,
+      );
+    }
+    lines.push('');
+  }
   if (summary.stop_lines.length > 0) {
     lines.push('## Stop lines hit', '');
     for (const row of summary.stop_lines) {
