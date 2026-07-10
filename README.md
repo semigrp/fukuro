@@ -60,7 +60,7 @@ entities that don't exist — unset, nothing changes.
 ```
 spec/       The written specification (chapters 00–06)
 cli/        The telemetry CLI (node:sqlite, no deps)
-skills/     Reference templates for the delegated outbound side (bootstrap / decompose / converge)
+skills/     Reference templates for the delegated outbound side (bootstrap / decompose / converge / instrument)
 examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
 ```
 
