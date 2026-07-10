@@ -234,6 +234,7 @@ test('report: coverage ratios and warning when most ticks lack pr', () => {
     loop_id: 0.8, // 4 of 5 events
     pr_scoped_pr: 0.5, // 3 ticks + merged, pr on 2
     issue_scoped_issue: 1, // loop_start carries issue
+    improve_applied_signal: null,
   });
   const text = cli.run('report');
   assert.ok(text.includes('warn: 2 of 3 ticks in this window have no pr'));
@@ -252,6 +253,7 @@ test('report: fully attributed window has full coverage and no warning', () => {
     loop_id: 1,
     pr_scoped_pr: 1,
     issue_scoped_issue: 1,
+    improve_applied_signal: null,
   });
   assert.ok(!cli.run('report').includes('warn:'));
 });
@@ -266,6 +268,7 @@ test('report: coverage is null when there are no relevant events', () => {
     loop_id: null,
     pr_scoped_pr: null,
     issue_scoped_issue: null,
+    improve_applied_signal: null,
   });
 });
 
@@ -344,6 +347,23 @@ test('hoot: above the candidate cap it degrades to a warning; zero candidates st
   const silent = spawnCli(quiet, 'log-event', 'tick', '--loop', 'M');
   assert.equal(silent.status, 0);
   assert.ok(!silent.stderr.includes('hoot'), 'nothing derivable, nothing to ask');
+});
+
+test('report: improve_applied signal coverage (anti-slop KPI)', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"target":"x","signal":"finding#1"}');
+  cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"target":"y"}');
+  cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"target":"z","signal":""}');
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as {
+    attribution_coverage: { improve_applied_signal: number };
+  };
+  assert.equal(summary.attribution_coverage.improve_applied_signal, 0.33); // empty string = missing
+  const pub = JSON.parse(
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+  ) as { attribution_coverage: { improve_applied_signal: number } };
+  assert.equal(pub.attribution_coverage.improve_applied_signal, 0.33);
+  assert.ok(cli.run('report').includes('improve_applied with signal'));
+  assert.ok(cli.run('report', '--format', 'md').includes('improve_applied with signal'));
 });
 
 test('open ledger: stale vs active vs closed vs reopened, across all three pairs', () => {

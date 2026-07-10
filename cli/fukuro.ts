@@ -595,6 +595,17 @@ function report(values: CliValues): void {
     };
   const prScoped = scoped(PR_SCOPED_KINDS, 'pr');
   const issueScoped = scoped(ISSUE_SCOPED_KINDS, 'issue');
+  // Anti-slop KPI: an applied improvement should trace back to a recorded
+  // signal. Measurement only — write-time enforcement is deliberately deferred.
+  const signalCoverage = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(json_extract(data,'$.signal') IS NOT NULL
+                  AND json_extract(data,'$.signal') <> '') AS with_field
+       FROM events
+       WHERE kind = 'improve_applied' AND ts >= datetime('now', ?)${loopClause}`,
+    )
+    .get(since, ...loopParams) as unknown as { total: number; with_field: number | null };
   const unattributedTicks = (
     db
       .prepare(
@@ -629,6 +640,7 @@ function report(values: CliValues): void {
       loop_id: ratio(windowTotals.with_loop, windowTotals.total),
       pr_scoped_pr: ratio(prScoped.with_field, prScoped.total),
       issue_scoped_issue: ratio(issueScoped.with_field, issueScoped.total),
+      improve_applied_signal: ratio(signalCoverage.with_field, signalCoverage.total),
     },
     // The ledger is all-time, like open hypotheses: an obligation opened last
     // month and never discharged is exactly what the report must surface.
@@ -693,6 +705,7 @@ type ReportSummary = {
     loop_id: number | null;
     pr_scoped_pr: number | null;
     issue_scoped_issue: number | null;
+    improve_applied_signal: number | null;
   };
   open_ledger: LedgerEntry[];
   hypotheses: {
@@ -747,6 +760,7 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`  events with loop:               ${pct(c.loop_id)}`);
   lines.push(`  PR-scoped events with pr:       ${pct(c.pr_scoped_pr)}`);
   lines.push(`  issue-scoped events with issue: ${pct(c.issue_scoped_issue)}`);
+  lines.push(`  improve_applied with signal:    ${pct(c.improve_applied_signal)}`);
   if (summary.open_ledger.length > 0) {
     const stale = summary.open_ledger.filter((e) => e.stale).length;
     lines.push('');
@@ -801,6 +815,7 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| events with loop | ${pct(c.loop_id)} |`);
   lines.push(`| PR-scoped events with pr | ${pct(c.pr_scoped_pr)} |`);
   lines.push(`| issue-scoped events with issue | ${pct(c.issue_scoped_issue)} |`);
+  lines.push(`| improve_applied with signal | ${pct(c.improve_applied_signal)} |`);
   lines.push('');
   if (summary.open_ledger.length > 0) {
     lines.push('## Open ledger', '');
