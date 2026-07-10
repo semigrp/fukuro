@@ -34,6 +34,20 @@ a different model family scoring the change; an adversarial reviewer prompted to
 outcome metrics over subsequent units (fully independent, but slow). Use the fast ones to filter,
 the slow one to confirm.
 
+## The vocabulary itself is a return-path target
+
+The nouns the outbound chapters contribute — which loops exist, which hypotheses are open, which
+stop lines are enforced — live in a user-owned entity directory (chapter 00), and the return path
+is what maintains it. Telemetry proposes entity creation and pruning: recurring unrouted work
+proposes a new loop entity; a stop line that never fires (or fires constantly) proposes pruning or
+tightening; a hypothesis with no events since it opened proposes closing or re-scoping. The cycle
+above applies unchanged — one proposal per cycle, verified against baselines, destructive edits
+gated by human approval.
+
+This is what keeps the delegation in chapter 00 honest: the structures fukuro no longer owns are
+still observed, and the entity files' write path is the return path itself — automatic by
+construction, not by discipline.
+
 ## Failures are seeds
 
 Every stop-line hit and every "no branch matched" is recorded, not just survived. The return path
