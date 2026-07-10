@@ -349,6 +349,57 @@ test('hoot: above the candidate cap it degrades to a warning; zero candidates st
   assert.ok(!silent.stderr.includes('hoot'), 'nothing derivable, nothing to ask');
 });
 
+test('lint: a clean lifecycle yields no findings and exit 0', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  cli.run('log-event', 'hypothesis_opened', '--loop', 'L', '--id', 'H-1', '--claim', 'c');
+  cli.run('log-event', 'hypothesis_confirmed', '--loop', 'L', '--id', 'H-1');
+  cli.run('log-event', 'loop_end', '--loop', 'L');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('lint: no findings'));
+});
+
+test('lint: orphan close and unbalanced loop warn and exit 1', () => {
+  const cli = makeCli();
+  // confirmed with no opened anywhere; opened-after-the-fact is still an orphan
+  cli.run('log-event', 'hypothesis_refuted', '--loop', 'A', '--id', 'H-9');
+  cli.run('log-event', 'hypothesis_opened', '--loop', 'A', '--id', 'H-9', '--claim', 'late');
+  // opened in A but closed in B: the (loop, id) scope must not match across loops
+  cli.run('log-event', 'hypothesis_confirmed', '--loop', 'B', '--id', 'H-9');
+  // loop_end without any loop_start
+  cli.run('log-event', 'loop_end', '--loop', 'M');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 1);
+  const orphans = res.stdout.match(/warn \[orphan-lifecycle\]/g) ?? [];
+  assert.equal(orphans.length, 2);
+  assert.ok(res.stdout.includes('backfill: fukuro log-event hypothesis_opened'));
+  assert.ok(res.stdout.includes('warn [unbalanced-loop] loop M has 1 loop_end but only 0 loop_start'));
+  assert.ok(res.stdout.includes('lint: 3 warning(s), 0 info'));
+});
+
+test('lint: same hypothesis id across loops is info only and exit 0', () => {
+  const cli = makeCli();
+  for (const loop of ['A', 'B']) {
+    cli.run('log-event', 'loop_start', '--loop', loop);
+    cli.run('log-event', 'hypothesis_opened', '--loop', loop, '--id', 'H-1', '--claim', 'c');
+    cli.run('log-event', 'hypothesis_confirmed', '--loop', loop, '--id', 'H-1');
+    cli.run('log-event', 'loop_end', '--loop', loop);
+  }
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0, 'info-only findings must not fail the run');
+  assert.ok(res.stdout.includes('info [ambiguous-hypothesis-id] hypothesis id H-1 opened in 2 loops (A,B)'));
+  assert.ok(res.stdout.includes('lint: 0 warning(s), 1 info'));
+
+  const json = JSON.parse(spawnCli(cli, 'lint', '--json').stdout) as {
+    findings: { check: string; severity: string }[];
+    warnings: number;
+    infos: number;
+  };
+  assert.deepEqual({ warnings: json.warnings, infos: json.infos }, { warnings: 0, infos: 1 });
+  assert.equal(json.findings[0]?.check, 'ambiguous-hypothesis-id');
+});
+
 test('report: improve_applied signal coverage (anti-slop KPI)', () => {
   const cli = makeCli();
   cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"target":"x","signal":"finding#1"}');

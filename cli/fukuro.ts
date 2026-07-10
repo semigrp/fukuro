@@ -41,6 +41,9 @@ Usage:
   fukuro report [--days N] [--loop <id>] [--profile private|public]
                 [--format text|json|md] [--out <path>]
                                            KPI summary (+ open hypotheses, stop-line breakdown)
+  fukuro lint [--json]                     Check the whole event log for lifecycle anomalies
+                                           (orphan closes, unbalanced loops, ambiguous ids);
+                                           exits 1 when anything warn-level is found
   fukuro help
 
 report options:
@@ -165,6 +168,8 @@ function main(): void {
       return listEvents(cli);
     case 'report':
       return report(cli);
+    case 'lint':
+      return lint(cli);
     case 'help':
       console.log(HELP);
       return;
@@ -468,6 +473,105 @@ function deriveLedger(db: ReturnType<typeof openDb>): LedgerEntry[] {
     }
   }
   return entries;
+}
+
+interface LintFinding {
+  check: string;
+  severity: 'warn' | 'info';
+  message: string;
+}
+
+type LintCheck = (db: ReturnType<typeof openDb>) => LintFinding[];
+
+/**
+ * Lint checks are data: each inspects the whole event log and returns findings.
+ * New checks (e.g. ontology references, #26) are appended here — the runner,
+ * severity accounting, and exit-code policy need no changes.
+ */
+const LINT_CHECKS: LintCheck[] = [
+  // orphan-lifecycle: a hypothesis close whose (loop_id, data.id) was never
+  // opened earlier. The claim text only lives in the opened payload, so the
+  // close is evidence for a claim the db never recorded. NULL-safe loop match
+  // (IS) keeps loop-less events comparable; a close without data.id can never
+  // match an opened and is flagged too.
+  function orphanLifecycle(db) {
+    const rows = db
+      .prepare(
+        `SELECT e.id, e.kind, e.loop_id, json_extract(e.data,'$.id') AS hid
+         FROM events e
+         WHERE e.kind IN ('hypothesis_confirmed','hypothesis_refuted')
+           AND NOT EXISTS (
+             SELECT 1 FROM events o
+             WHERE o.kind = 'hypothesis_opened' AND o.id < e.id
+               AND o.loop_id IS e.loop_id
+               AND json_extract(o.data,'$.id') = json_extract(e.data,'$.id')
+           )
+         ORDER BY e.id`,
+      )
+      .all() as unknown as { id: number; kind: string; loop_id: string | null; hid: string | null }[];
+    return rows.map((r) => ({
+      check: 'orphan-lifecycle',
+      severity: 'warn' as const,
+      message:
+        `event #${r.id} ${r.kind} (id=${r.hid ?? 'missing'}, loop=${r.loop_id ?? '-'}) has no prior hypothesis_opened — ` +
+        `backfill: fukuro log-event hypothesis_opened --loop ${r.loop_id ?? '<loop>'} --id ${r.hid ?? '<id>'} --claim "..."`,
+    }));
+  },
+  // unbalanced-loop: more ends than starts for one loop_id — a double-close,
+  // or an end logged against a loop that was never started.
+  function unbalancedLoop(db) {
+    const rows = db
+      .prepare(
+        `SELECT loop_id, SUM(kind = 'loop_start') AS starts, SUM(kind = 'loop_end') AS ends
+         FROM events
+         WHERE loop_id IS NOT NULL AND kind IN ('loop_start','loop_end')
+         GROUP BY loop_id HAVING ends > starts ORDER BY loop_id`,
+      )
+      .all() as unknown as { loop_id: string; starts: number; ends: number }[];
+    return rows.map((r) => ({
+      check: 'unbalanced-loop',
+      severity: 'warn' as const,
+      message: `loop ${r.loop_id} has ${r.ends} loop_end but only ${r.starts} loop_start — double-close or missing loop_start`,
+    }));
+  },
+  // ambiguous-hypothesis-id: the same id opened in more than one loop. Existing
+  // data stays disambiguated by loop scope; new ids should be globally unique.
+  function ambiguousHypothesisId(db) {
+    const rows = db
+      .prepare(
+        `SELECT hid, COUNT(DISTINCT loop) AS n, GROUP_CONCAT(DISTINCT loop) AS loops
+         FROM (SELECT json_extract(data,'$.id') AS hid, COALESCE(loop_id,'-') AS loop
+               FROM events WHERE kind = 'hypothesis_opened')
+         WHERE hid IS NOT NULL
+         GROUP BY hid HAVING n > 1 ORDER BY hid`,
+      )
+      .all() as unknown as { hid: string; n: number; loops: string }[];
+    return rows.map((r) => ({
+      check: 'ambiguous-hypothesis-id',
+      severity: 'info' as const,
+      message: `hypothesis id ${r.hid} opened in ${r.n} loops (${r.loops}) — prefer globally unique ids going forward`,
+    }));
+  },
+];
+
+function lint(values: CliValues): void {
+  const db = openDb();
+  const findings = LINT_CHECKS.flatMap((check) => check(db));
+  db.close();
+  const warns = findings.filter((f) => f.severity === 'warn').length;
+  const infos = findings.length - warns;
+  if (values.json) {
+    console.log(JSON.stringify({ findings, warnings: warns, infos }, null, 2));
+  } else {
+    for (const f of findings) console.log(`${f.severity} [${f.check}] ${f.message}`);
+    console.log(
+      findings.length === 0
+        ? 'lint: no findings'
+        : `lint: ${warns} warning(s), ${infos} info in ${findings.length} finding(s)`,
+    );
+  }
+  // info alone is advisory; anything warn-level makes the run fail.
+  if (warns > 0) process.exitCode = 1;
 }
 
 function report(values: CliValues): void {
