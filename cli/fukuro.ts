@@ -55,7 +55,8 @@ report options:
 log-event options:
   --loop <id>      Logical loop name (e.g. parent issue slug)
   --issue <n>      Issue number
-  --pr <n>         Pull request number
+  --pr <n|none>    Pull request number. "none" acknowledges a deliberately
+                   unattributed event (recorded as data.attribution=explicit_none)
   --session <id>   Session id (default: $FUKURO_SESSION, else a harness session id)
   --data <json>    JSON payload
   --id <id>        Sugar for data.id (unit id, e.g. H-1)
@@ -213,6 +214,9 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   if (values.claim !== undefined) sugar.claim = values.claim;
   if (values.evidence !== undefined) sugar.evidence = values.evidence;
   if (values['closes-when'] !== undefined) sugar.closes_when = values['closes-when'];
+  // `--pr none` is an explicit acknowledgment, not silence. It must live on the
+  // event itself, and the pr column (INTEGER) cannot carry the sentinel.
+  if (values.pr === 'none') sugar.attribution = 'explicit_none';
   let data: string | null = null;
   if (Object.keys(sugar).length > 0) {
     if (
@@ -247,12 +251,48 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   const loop = values.loop ?? derived?.loop ?? null;
   const issue =
     toInt('issue', values.issue) ?? (foreignLoop ? null : (derived?.issue ?? null));
-  const pr = toInt('pr', values.pr) ?? (foreignLoop ? null : (derived?.pr ?? null));
+  const prNone = values.pr === 'none';
+  const pr = prNone
+    ? null
+    : (toInt('pr', values.pr) ?? (foreignLoop ? null : (derived?.pr ?? null)));
 
   const filled: string[] = [];
   if (values.loop === undefined && loop !== null) filled.push(`loop=${loop}`);
   if (values.issue === undefined && issue !== null) filled.push(`issue=#${issue}`);
   if (values.pr === undefined && pr !== null) filled.push(`pr=#${pr}`);
+
+  // Attribution contract, preflight (hoot): a PR-scoped event with no pr is
+  // invisible to per-PR aggregation, and only the writer can still disambiguate.
+  // Refuse while the candidate set is small enough to enumerate; degrade to a
+  // one-line warning above the cap; stay silent when nothing is derivable
+  // (read-time coverage remains the net). This assumes the writer reads command
+  // output and can retry — scripted writers should always pass explicit flags.
+  if (PR_SCOPED_KINDS.includes(kind) && pr === null && !prNone) {
+    const candidates = (
+      db
+        .prepare(
+          `SELECT DISTINCT pr FROM events e
+           WHERE kind = 'pr_opened' AND pr IS NOT NULL AND loop_id IS ?
+             AND NOT EXISTS (SELECT 1 FROM events m
+                             WHERE m.kind = 'merged' AND m.pr = e.pr AND m.loop_id IS e.loop_id)`,
+        )
+        .all(loop) as unknown as { pr: number }[]
+    ).map((row) => row.pr);
+    if (candidates.length > 0 && candidates.length <= HOOT_CANDIDATE_CAP) {
+      db.close();
+      console.error(
+        `hoot: ${candidates.length} PR(s) open in this loop (${candidates
+          .map((p) => `#${p}`)
+          .join(' ')}) — "${kind}" is unattributed. Pass --pr <n>, or --pr none to acknowledge.`,
+      );
+      process.exit(2);
+    }
+    if (candidates.length > HOOT_CANDIDATE_CAP) {
+      console.warn(
+        `hoot: ${candidates.length} PRs open in this loop; "${kind}" logged without pr`,
+      );
+    }
+  }
 
   const result = db
     .prepare(
@@ -340,6 +380,8 @@ function listEvents(values: CliValues): void {
 // report measures its own measurement quality instead of silently under-reporting.
 const PR_SCOPED_KINDS = ['tick', 'pr_opened', 'review_round', 'merged'];
 const ISSUE_SCOPED_KINDS = ['loop_start', 'issue_closed'];
+// Above this many open-PR candidates, hoot stops enumerating and only warns.
+const HOOT_CANDIDATE_CAP = 5;
 
 function report(values: CliValues): void {
   const days = toInt('days', values.days) ?? 7;
@@ -448,10 +490,14 @@ function report(values: CliValues): void {
     with_session: number | null;
     with_loop: number | null;
   };
+  // `--pr none` acknowledgments count as attributed: deliberate non-attribution
+  // is the writer's answer, not a measurement gap.
+  const ackExpr = `COALESCE(json_extract(data,'$.attribution'),'') = 'explicit_none'`;
   const scoped = (kinds: string[], column: 'pr' | 'issue') =>
     db
       .prepare(
-        `SELECT COUNT(*) AS total, SUM(${column} IS NOT NULL) AS with_field
+        `SELECT COUNT(*) AS total,
+                SUM(${column} IS NOT NULL${column === 'pr' ? ` OR ${ackExpr}` : ''}) AS with_field
          FROM events
          WHERE kind IN (${kinds.map(() => '?').join(',')})
            AND ts >= datetime('now', ?)${loopClause}`,
@@ -466,7 +512,8 @@ function report(values: CliValues): void {
     db
       .prepare(
         `SELECT COUNT(*) AS n FROM events
-         WHERE kind = 'tick' AND pr IS NULL AND ts >= datetime('now', ?)${loopClause}`,
+         WHERE kind = 'tick' AND pr IS NULL AND NOT (${ackExpr})
+           AND ts >= datetime('now', ?)${loopClause}`,
       )
       .get(since, ...loopParams) as unknown as { n: number }
   ).n;

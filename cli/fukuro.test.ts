@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -277,6 +277,73 @@ test('report: public profile keeps coverage aggregates', () => {
   ) as CoverageSummary;
   assert.equal(typeof summary.unattributed_ticks, 'number');
   assert.equal(typeof summary.attribution_coverage.session, 'number');
+});
+
+/** Like cli.run but returns status/stdout/stderr instead of throwing. */
+const spawnCli = (cli: ReturnType<typeof makeCli>, ...args: string[]) => {
+  const res = spawnSync(process.execPath, [bin, ...args], {
+    cwd: cli.dir,
+    env: { ...process.env, FUKURO_DB: cli.dbFile, FUKURO_SESSION: '', CLAUDE_CODE_SESSION_ID: '' },
+  });
+  return { status: res.status, stdout: res.stdout.toString(), stderr: res.stderr.toString() };
+};
+
+test('hoot: PR-scoped event without pr is refused while candidates are enumerable', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '9');
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '12');
+  const refused = spawnCli(cli, 'log-event', 'tick', '--loop', 'L');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('hoot:'));
+  assert.ok(refused.stderr.includes('#9') && refused.stderr.includes('#12'));
+  const ticks = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='tick'").get() as {
+    n: number;
+  };
+  assert.equal(ticks.n, 0, 'a refused write must not append');
+  // a merged PR is no longer a candidate
+  cli.run('log-event', 'merged', '--loop', 'L', '--pr', '12');
+  const after = spawnCli(cli, 'log-event', 'tick', '--loop', 'L');
+  assert.ok(after.stderr.includes('#9') && !after.stderr.includes('#12'));
+});
+
+test('hoot: --pr none is accepted, recorded, and acknowledged by report', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '9');
+  cli.run('log-event', 'tick', '--loop', 'L', '--pr', 'none');
+  const row = cli
+    .db()
+    .prepare("SELECT pr, data FROM events WHERE kind='tick'")
+    .get() as { pr: number | null; data: string };
+  assert.equal(row.pr, null);
+  assert.equal((JSON.parse(row.data) as { attribution: string }).attribution, 'explicit_none');
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as {
+    window_ticks: number;
+    unattributed_ticks: number;
+    attribution_coverage: { pr_scoped_pr: number };
+  };
+  assert.equal(summary.window_ticks, 1);
+  assert.equal(summary.unattributed_ticks, 0);
+  assert.equal(summary.attribution_coverage.pr_scoped_pr, 1); // ack counts as attributed
+  assert.ok(!cli.run('report').includes('warn:'));
+});
+
+test('hoot: above the candidate cap it degrades to a warning; zero candidates stay silent', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', String(n));
+  }
+  const warned = spawnCli(cli, 'log-event', 'tick', '--loop', 'L');
+  assert.equal(warned.status, 0, 'above the cap the write is accepted');
+  assert.ok(warned.stderr.includes('hoot:'));
+
+  const quiet = makeCli();
+  quiet.run('log-event', 'loop_start', '--loop', 'M');
+  const silent = spawnCli(quiet, 'log-event', 'tick', '--loop', 'M');
+  assert.equal(silent.status, 0);
+  assert.ok(!silent.stderr.includes('hoot'), 'nothing derivable, nothing to ask');
 });
 
 test('events --loop filters to one loop', () => {
