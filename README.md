@@ -11,14 +11,17 @@ agents (Claude, Codex, or anything else) as designed loops rather than interacti
 ## The model: three layers + a return path
 
 Most discussion of loop engineering enumerates ingredients (automations, worktrees, skills,
-connectors, sub-agents, external state). fukuro organizes them into layers with distinct jobs:
+connectors, sub-agents, external state). fukuro maps them into layers with distinct jobs — and
+deliberately **owns only the last one**. Delegation is the design ([`spec/00`](spec/00-overview.md)):
+each outbound structure lives where its write path is already automatic, because structures that
+demand manual upkeep starve.
 
-| Layer | Question it answers | Structure |
-|---|---|---|
-| 1. **Routing** | Which loop should this work enter? | Decision tree (trigger-based, progressively disclosed) |
-| 2. **Decomposition** | What are the verifiable units, in what order? | DAG — parent = plan, child = one PR-sized unit |
-| 3. **Convergence** | How does each unit reach *done*? | Stateless-tick feedback loop with verification gates |
-| ↩ **Return path** | How does the system itself get better? | evaluate → audit → author, under *only improvements survive* |
+| Layer | Question it answers | Structure | Where it lives |
+|---|---|---|---|
+| 1. **Routing** | Which loop should this work enter? | Trigger-based routing | Your harness's native skill routing |
+| 2. **Decomposition** | What are the verifiable units, in what order? | DAG — parent = plan, child = one PR-sized unit | The issue tracker |
+| 3. **Convergence** | How does each unit reach *done*? | Stateless-tick feedback loop with verification gates | Skills & automations (the loop engine) |
+| ↩ **Return path** | How does the system itself get better? | evaluate → audit → author, under *only improvements survive* | **fukuro** |
 
 The essence of a loop is not the graph shape — it is **propose → act → verify → update external
 state → decide to continue or stop**. The decision tree is a context-selection device on top of it;
@@ -42,6 +45,7 @@ npx fukuro log-event merged       --pr 472
 npx fukuro report --days 7
 npx fukuro report --format md --out ~/vault/fukuro-weekly.md   # export: Obsidian/Notion/GitHub
 npx fukuro events --limit 20
+npx fukuro lint                                                # integrity checks on the event log
 ```
 
 The CLI is deliberately agent-agnostic: call it from Claude Code hooks, Codex automations, CI, or
@@ -56,8 +60,7 @@ entities that don't exist — unset, nothing changes.
 ```
 spec/       The written specification (chapters 00–06)
 cli/        The telemetry CLI (node:sqlite, no deps)
-skills/     Generic skill templates for the routing/convergence layers (WIP)
-state/      State-backend adapter contract: GitHub / Notion / markdown / SQLite (WIP)
+skills/     Reference templates for the delegated outbound side (bootstrap / decompose / converge)
 examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
 ```
 
@@ -88,10 +91,12 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
 ## Status
 
 Early. The spec chapters are drafted; the CLI covers `init` / `ctx` / `log-event` / `events` /
-`report` — including stateless context derivation (position recomputed from git and the event
-log; nothing stored), structural redaction (`--profile public`), and hook recipes
-([`docs/hooks.md`](docs/hooks.md)). Roadmap: skill templates, state-backend adapters, a
-GitHub-only example loop, and outcome-based baseline guards for the return path.
+`report` / `lint` — including stateless context derivation (position recomputed from git and the
+event log; nothing stored), structural redaction (`--profile public`), lifecycle and
+reference-integrity checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in),
+and hook recipes ([`docs/hooks.md`](docs/hooks.md)). Roadmap: a GitHub-only golden-path example,
+a first-week adoption path, correction markers for the append-only log, and outcome-based
+baseline guards for the return path.
 
 ## License
 
