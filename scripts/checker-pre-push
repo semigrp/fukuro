@@ -1,0 +1,110 @@
+#!/bin/sh
+# checker-pre-push — a mechanical maker≠checker gate for direct-push repos.
+#
+# Design principle 2 says the model that wrote a change never grades it alone.
+# In a solo repo that pushes straight to main, nothing enforces that — this
+# hook does: before a push leaves the machine, the outgoing diff is shown to
+# an independent reviewer (any second model or tool, configured by you), and
+# the push proceeds only on an explicit PASS verdict.
+#
+# Contract (full docs: docs/checker.md):
+#   FUKURO_CHECKER_CMD   shell command that reads a unified diff on stdin and
+#                        ends its output with "VERDICT: PASS" or "VERDICT: BLOCK".
+#                        Unset => the hook warns and lets the push through
+#                        (opt-in: installing the recipe never bricks a repo).
+#   FUKURO_CHECKER_SKIP  set to 1 to bypass the gate. The bypass is logged as
+#                        a human_intervention event first — you can override
+#                        the gate, you cannot do it invisibly.
+#
+# Install (pick one):
+#   cp scripts/checker-pre-push .git/hooks/pre-push
+#   git config core.hooksPath <dir containing this file named pre-push>
+#
+# Zero dependencies: POSIX sh + git. The reviewer command is yours to choose.
+
+set -u
+
+warn() { printf 'checker-pre-push: %s\n' "$*" >&2; }
+
+ZERO=0000000000000000000000000000000000000000
+
+# --- opt-in: no reviewer configured => advisory warning, push proceeds ----
+if [ -z "${FUKURO_CHECKER_CMD:-}" ]; then
+  warn 'FUKURO_CHECKER_CMD is not set — pushing without independent review'
+  warn 'see docs/checker.md to enable the maker!=checker gate'
+  exit 0
+fi
+
+# --- accountable bypass ----------------------------------------------------
+if [ "${FUKURO_CHECKER_SKIP:-}" = "1" ]; then
+  warn 'bypass requested (FUKURO_CHECKER_SKIP=1) — recording it'
+  if command -v fukuro >/dev/null 2>&1; then
+    fukuro log-event human_intervention \
+      --data '{"reason":"checker bypassed","gate":"pre-push"}' </dev/null \
+      || warn 'could not log the bypass event'
+  else
+    warn 'fukuro CLI not found — bypass NOT logged; the audit trail has a gap'
+  fi
+  exit 0
+fi
+
+# --- collect the outgoing diff ---------------------------------------------
+# git invokes pre-push with "<local ref> <local sha> <remote ref> <remote sha>"
+# lines on stdin. Run by hand (tty or empty stdin), fall back to
+# origin/main..HEAD so the gate can be exercised outside a real push.
+range_diff() {
+  # $1 = local sha, $2 = remote sha on the receiving end
+  if [ "$2" = "$ZERO" ]; then
+    # remote ref doesn't exist yet: review everything past the merge base
+    # with origin/main, or the tip commit if there is no base to compare to
+    base=$(git merge-base origin/main "$1" 2>/dev/null </dev/null) || base=""
+    if [ -n "$base" ]; then
+      git diff "$base" "$1" </dev/null
+    else
+      git show --patch "$1" </dev/null
+    fi
+  else
+    git diff "$2" "$1" </dev/null
+  fi
+}
+
+diff_out=""
+got_stdin=0
+if [ ! -t 0 ]; then
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    got_stdin=1
+    [ "$local_sha" = "$ZERO" ] && continue   # ref deletion: nothing to review
+    diff_out="${diff_out}$(range_diff "$local_sha" "$remote_sha")
+"
+  done
+fi
+if [ "$got_stdin" = "0" ]; then
+  diff_out=$(git diff origin/main..HEAD 2>/dev/null </dev/null) || diff_out=""
+fi
+
+if [ -z "$(printf '%s' "$diff_out" | tr -d '[:space:]')" ]; then
+  warn 'no outgoing changes to review — pushing'
+  exit 0
+fi
+
+# --- independent review -----------------------------------------------------
+review=$(printf '%s\n' "$diff_out" | sh -c "$FUKURO_CHECKER_CMD" 2>&1)
+cmd_status=$?
+printf '%s\n' "$review"
+
+verdict=$(printf '%s\n' "$review" | grep -E '^VERDICT: (PASS|BLOCK)' | tail -n 1)
+case "$verdict" in
+  'VERDICT: PASS'*)
+    exit 0
+    ;;
+  'VERDICT: BLOCK'*)
+    warn 'push blocked by the independent checker (reasoning above)'
+    warn 'to override: FUKURO_CHECKER_SKIP=1 git push ...  (the bypass is logged)'
+    exit 1
+    ;;
+  *)
+    warn "reviewer ended without a verdict line (exit $cmd_status) — blocking"
+    warn "the reviewer must end with 'VERDICT: PASS' or 'VERDICT: BLOCK'"
+    exit 1
+    ;;
+esac

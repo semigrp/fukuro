@@ -94,7 +94,8 @@ Early. The spec chapters are drafted; the CLI covers `init` / `ctx` / `log-event
 `report` / `lint` — including stateless context derivation (position recomputed from git and the
 event log; nothing stored), structural redaction (`--profile public`), lifecycle and
 reference-integrity checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in),
-and hook recipes ([`docs/hooks.md`](docs/hooks.md)). Roadmap: a GitHub-only golden-path example,
+hook recipes ([`docs/hooks.md`](docs/hooks.md)), and a maker≠checker pre-push gate recipe for
+direct-push repos ([`docs/checker.md`](docs/checker.md)). Roadmap: a GitHub-only golden-path example,
 a first-week adoption path, correction markers for the append-only log, and outcome-based
 baseline guards for the return path.
 
