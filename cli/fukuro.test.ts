@@ -529,6 +529,100 @@ test('open ledger: public profile redacts scopes but keeps ages', () => {
   assert.ok(summary.open_ledger.every((e) => typeof e.silent_days === 'number'));
 });
 
+type UnitSize = {
+  prs_total: number;
+  prs_with_size: number;
+  size_coverage: number | null;
+  median_lines: number | null;
+  max_lines: number | null;
+  compliance_rate: number | null;
+  oversized: { pr: number; lines: number }[];
+};
+
+/** Seeds a window of PRs with mixed diff-stat payloads for the unit-size KPI. */
+const seedSizedPrs = (dbFile: string): void => {
+  const db = new DatabaseSync(dbFile);
+  db.exec(schema);
+  const insert = db.prepare('INSERT INTO events (ts, loop_id, pr, kind, data) VALUES (?, ?, ?, ?, ?)');
+  const at = (minutesAgo: number): string =>
+    new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  // #1: compliant (90 lines), stats only at open — the opened value stands
+  insert.run(at(300), 'L', 1, 'pr_opened', JSON.stringify({ additions: 60, deletions: 30 }));
+  insert.run(at(250), 'L', 1, 'merged', null);
+  // #2: opened at 120 lines, grew to 250 by merge — the latest sized event wins
+  insert.run(at(240), 'L', 2, 'pr_opened', JSON.stringify({ additions: 100, deletions: 20 }));
+  insert.run(at(200), 'L', 2, 'merged', JSON.stringify({ additions: 200, deletions: 50 }));
+  // #3: no size data at all — counts against coverage, not against compliance
+  insert.run(at(100), 'L', 3, 'pr_opened', null);
+  db.close();
+};
+
+test('report: unit-size KPI — compliance vs the 100-line principle, coverage, latest value wins', () => {
+  const cli = makeCli();
+  seedSizedPrs(cli.dbFile);
+  const u = (JSON.parse(cli.run('report', '--format', 'json')) as { unit_size: UnitSize }).unit_size;
+  assert.equal(u.prs_total, 3);
+  assert.equal(u.prs_with_size, 2);
+  assert.equal(u.size_coverage, 0.67);
+  assert.equal(u.median_lines, 170); // (90 + 250) / 2
+  assert.equal(u.max_lines, 250);
+  assert.equal(u.compliance_rate, 0.5); // #1 ≤ 100, #2 above
+  assert.deepEqual(u.oversized, [{ pr: 2, lines: 250 }]);
+  const text = cli.run('report');
+  assert.ok(text.includes('unit size (principle 3'));
+  assert.ok(text.includes('warn: PR #2 is 250 changed lines'));
+  const md = cli.run('report', '--format', 'md');
+  assert.ok(md.includes('## Unit size') && md.includes('PR #2: 250 changed lines'));
+});
+
+test('report: unit-size public profile keeps aggregates, drops PR numbers', () => {
+  const cli = makeCli();
+  seedSizedPrs(cli.dbFile);
+  const outputs = [
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+    cli.run('report', '--format', 'md', '--profile', 'public'),
+    cli.run('report', '--profile', 'public'),
+  ].join('\n');
+  assert.ok(!/#2\b/.test(outputs), 'oversized PR numbers must be redacted');
+  const u = (
+    JSON.parse(cli.run('report', '--format', 'json', '--profile', 'public')) as { unit_size: UnitSize }
+  ).unit_size;
+  assert.deepEqual(u, {
+    prs_total: 3,
+    prs_with_size: 2,
+    size_coverage: 0.67,
+    median_lines: 170,
+    max_lines: 250,
+    compliance_rate: 0.5,
+    oversized: [],
+  });
+});
+
+test('report: unit-size without size data collapses to a pointer; empty window omits the section', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '5');
+  const u = (JSON.parse(cli.run('report', '--format', 'json')) as { unit_size: UnitSize }).unit_size;
+  assert.deepEqual(u, {
+    prs_total: 1,
+    prs_with_size: 0,
+    size_coverage: 0,
+    median_lines: null,
+    max_lines: null,
+    compliance_rate: null,
+    oversized: [],
+  });
+  assert.ok(cli.run('report').includes('no size data'));
+
+  const empty = makeCli();
+  empty.run('init');
+  const noPrs = (JSON.parse(empty.run('report', '--format', 'json')) as { unit_size: UnitSize }).unit_size;
+  assert.equal(noPrs.prs_total, 0);
+  assert.equal(noPrs.size_coverage, null);
+  assert.ok(!empty.run('report').includes('unit size'));
+  assert.ok(!empty.run('report', '--format', 'md').includes('Unit size'));
+});
+
 test('events --loop filters to one loop', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'A');

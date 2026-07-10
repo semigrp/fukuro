@@ -49,6 +49,24 @@ everything else is derived.
 }
 ```
 
+### Variant: attach diff stats (unit-size KPI)
+
+Principle 3 (small verifiable units, ~100 changed lines) is measured by `report` from
+`data.additions`/`data.deletions` on `pr_opened`/`merged` events. `gh pr view <n> --json
+additions,deletions` prints exactly the payload shape `--data` expects, so the same hook grows by
+one call:
+
+```json
+{
+  "type": "command",
+  "command": "jq -r 'select(.tool_input.command | test(\"gh pr create\")) | .tool_response.stdout // empty' | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1 | xargs -I{} sh -c 'fukuro log-event pr_opened --pr {} --data \"$(gh pr view {} --json additions,deletions)\"'"
+}
+```
+
+The same works at merge time: fetch the final stats and attach them to the `merged` event — the
+report uses the latest sized event per PR, so a unit that grew during review is measured at its
+merged size.
+
 Adapt the extraction to your harness's hook payload shape — the pattern is: *detect the moment,
 extract the one fact derivation can't know yet, log.*
 

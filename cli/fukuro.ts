@@ -883,6 +883,48 @@ function report(values: CliValues): void {
       .get(since, ...loopParams) as unknown as { n: number }
   ).n;
 
+  // Unit-size KPI (principle 3: small verifiable units, ~100 changed lines per
+  // child PR). Sizes come from data.additions/deletions on pr_opened/merged —
+  // the hook recipe attaches them (docs/hooks.md). The latest sized event per
+  // PR wins: a PR's size legitimately changes between open and merge. Coverage
+  // is reported alongside, like attribution: the KPI measures its own
+  // measurement quality instead of silently under-reporting.
+  const sizeRows = db
+    .prepare(
+      `SELECT pr,
+              json_extract(data,'$.additions') AS additions,
+              json_extract(data,'$.deletions') AS deletions
+       FROM events
+       WHERE kind IN ('pr_opened','merged') AND pr IS NOT NULL
+         AND ts >= datetime('now', ?)${loopClause}
+       ORDER BY ts, id`,
+    )
+    .all(since, ...loopParams) as unknown as {
+    pr: number;
+    additions: number | null;
+    deletions: number | null;
+  }[];
+  const linesByPr = new Map<number, number>();
+  for (const r of sizeRows) {
+    if (r.additions != null && r.deletions != null) {
+      linesByPr.set(r.pr, Number(r.additions) + Number(r.deletions));
+    }
+  }
+  const sizes = [...linesByPr.values()];
+  const windowPrCount = new Set(sizeRows.map((r) => r.pr)).size;
+  const unitSize: UnitSizeStats = {
+    prs_total: windowPrCount,
+    prs_with_size: linesByPr.size,
+    size_coverage: ratio(linesByPr.size, windowPrCount),
+    median_lines: median(sizes),
+    max_lines: sizes.length > 0 ? Math.max(...sizes) : null,
+    compliance_rate: ratio(sizes.filter((n) => n <= UNIT_SIZE_TARGET).length, sizes.length),
+    oversized: [...linesByPr.entries()]
+      .filter(([, lines]) => lines > UNIT_SIZE_CAP)
+      .map(([pr, lines]) => ({ pr, lines }))
+      .sort((a, b) => b.lines - a.lines),
+  };
+
   const count = (kind: string): number => byKind.find((r) => r.kind === kind)?.n ?? 0;
   const merges = mergedPrs.length;
   const fullSummary = {
@@ -909,6 +951,7 @@ function report(values: CliValues): void {
       issue_scoped_issue: ratio(issueScoped.with_field, issueScoped.total),
       improve_applied_signal: ratio(signalCoverage.with_field, signalCoverage.total),
     },
+    unit_size: unitSize,
     // The ledger is all-time, like open hypotheses: an obligation opened last
     // month and never discharged is exactly what the report must surface.
     open_ledger: deriveLedger(db),
@@ -930,6 +973,7 @@ function report(values: CliValues): void {
       ? {
           ...fullSummary,
           loop: fullSummary.loop === null ? null : '(redacted)',
+          unit_size: { ...fullSummary.unit_size, oversized: [] },
           stop_lines: [],
           hypotheses: { ...fullSummary.hypotheses, open: [] },
           open_ledger: fullSummary.open_ledger.map((e) => ({ ...e, scope: '(redacted)' })),
@@ -955,6 +999,21 @@ function report(values: CliValues): void {
   }
 }
 
+// Principle 3 thresholds: ~100 changed lines is the unit-size target for a
+// child PR; past 200 the unit should have been split.
+const UNIT_SIZE_TARGET = 100;
+const UNIT_SIZE_CAP = 200;
+
+interface UnitSizeStats {
+  prs_total: number; // PRs seen in the window (pr_opened/merged)
+  prs_with_size: number;
+  size_coverage: number | null;
+  median_lines: number | null;
+  max_lines: number | null;
+  compliance_rate: number | null; // share of sized PRs at ≤ UNIT_SIZE_TARGET lines
+  oversized: { pr: number; lines: number }[]; // > UNIT_SIZE_CAP
+}
+
 type ReportSummary = {
   window_days: number;
   loop: string | null;
@@ -974,6 +1033,7 @@ type ReportSummary = {
     issue_scoped_issue: number | null;
     improve_applied_signal: number | null;
   };
+  unit_size: UnitSizeStats;
   open_ledger: LedgerEntry[];
   hypotheses: {
     opened_in_window: number;
@@ -1028,6 +1088,23 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`  PR-scoped events with pr:       ${pct(c.pr_scoped_pr)}`);
   lines.push(`  issue-scoped events with issue: ${pct(c.issue_scoped_issue)}`);
   lines.push(`  improve_applied with signal:    ${pct(c.improve_applied_signal)}`);
+  const u = summary.unit_size;
+  if (u.prs_total > 0) {
+    lines.push('');
+    lines.push(`unit size (principle 3, target ≤${UNIT_SIZE_TARGET} lines):`);
+    if (u.prs_with_size === 0) {
+      lines.push(
+        `  no size data on this window's ${u.prs_total} PR(s) — see docs/hooks.md to capture diff stats`,
+      );
+    } else {
+      lines.push(`  PRs with size data:        ${u.prs_with_size}/${u.prs_total} (${pct(u.size_coverage)})`);
+      lines.push(`  median / max lines per PR: ${u.median_lines} / ${u.max_lines}`);
+      lines.push(`  ≤${UNIT_SIZE_TARGET}-line PRs (compliance):  ${pct(u.compliance_rate)}`);
+      for (const o of u.oversized) {
+        lines.push(`  warn: PR #${o.pr} is ${o.lines} changed lines — over the ${UNIT_SIZE_CAP}-line cap, split the unit`);
+      }
+    }
+  }
   if (summary.open_ledger.length > 0) {
     const stale = summary.open_ledger.filter((e) => e.stale).length;
     lines.push('');
@@ -1084,6 +1161,25 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| issue-scoped events with issue | ${pct(c.issue_scoped_issue)} |`);
   lines.push(`| improve_applied with signal | ${pct(c.improve_applied_signal)} |`);
   lines.push('');
+  const u = summary.unit_size;
+  if (u.prs_total > 0) {
+    lines.push(`## Unit size (principle 3, target ≤${UNIT_SIZE_TARGET} lines)`, '');
+    if (u.prs_with_size === 0) {
+      lines.push(`_No size data on this window's ${u.prs_total} PR(s) — see \`docs/hooks.md\` to capture diff stats._`, '');
+    } else {
+      lines.push('| metric | value |');
+      lines.push('|---|---|');
+      lines.push(`| PRs with size data | ${u.prs_with_size}/${u.prs_total} (${pct(u.size_coverage)}) |`);
+      lines.push(`| median lines / PR | ${u.median_lines} |`);
+      lines.push(`| max lines / PR | ${u.max_lines} |`);
+      lines.push(`| ≤${UNIT_SIZE_TARGET}-line PRs (compliance) | ${pct(u.compliance_rate)} |`);
+      lines.push('');
+      for (const o of u.oversized) {
+        lines.push(`> ⚠ PR #${o.pr}: ${o.lines} changed lines — over the ${UNIT_SIZE_CAP}-line cap, split the unit`);
+      }
+      if (u.oversized.length > 0) lines.push('');
+    }
+  }
   if (summary.open_ledger.length > 0) {
     lines.push('## Open ledger', '');
     lines.push('| pair | scope | opened | silent (days) | stale |');
