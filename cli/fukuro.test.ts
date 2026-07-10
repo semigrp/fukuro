@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -25,6 +25,7 @@ const makeCli = () => {
         FUKURO_DB: dbFile,
         FUKURO_SESSION: '',
         CLAUDE_CODE_SESSION_ID: '',
+        FUKURO_ONTOLOGY: '', // empty = unset: tests opt in explicitly
         ...extraEnv,
       },
     }).toString();
@@ -283,13 +284,26 @@ test('report: public profile keeps coverage aggregates', () => {
 });
 
 /** Like cli.run but returns status/stdout/stderr instead of throwing. */
-const spawnCli = (cli: ReturnType<typeof makeCli>, ...args: string[]) => {
+const spawnCliEnv = (
+  cli: ReturnType<typeof makeCli>,
+  extraEnv: Record<string, string>,
+  ...args: string[]
+) => {
   const res = spawnSync(process.execPath, [bin, ...args], {
     cwd: cli.dir,
-    env: { ...process.env, FUKURO_DB: cli.dbFile, FUKURO_SESSION: '', CLAUDE_CODE_SESSION_ID: '' },
+    env: {
+      ...process.env,
+      FUKURO_DB: cli.dbFile,
+      FUKURO_SESSION: '',
+      CLAUDE_CODE_SESSION_ID: '',
+      FUKURO_ONTOLOGY: '',
+      ...extraEnv,
+    },
   });
   return { status: res.status, stdout: res.stdout.toString(), stderr: res.stderr.toString() };
 };
+const spawnCli = (cli: ReturnType<typeof makeCli>, ...args: string[]) =>
+  spawnCliEnv(cli, {}, ...args);
 
 test('hoot: PR-scoped event without pr is refused while candidates are enumerable', () => {
   const cli = makeCli();
@@ -478,6 +492,75 @@ test('events --loop filters to one loop', () => {
   const output = cli.run('events', '--loop', 'A', '--json');
   const rows = JSON.parse(output) as { loop_id: string }[];
   assert.ok(rows.length === 2 && rows.every((row) => row.loop_id === 'A'));
+});
+
+/** Synthetic entity directory: loop/, hypothesis/, stop-line/ with one .md per entity. */
+const makeOntology = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'fukuro-ont-'));
+  for (const sub of ['loop', 'hypothesis', 'stop-line']) mkdirSync(join(dir, sub));
+  writeFileSync(join(dir, 'loop', 'L1.md'), '# L1\n');
+  writeFileSync(join(dir, 'hypothesis', 'h-1.md'), '# plain slug\n');
+  writeFileSync(join(dir, 'hypothesis', 'L1-h-2.md'), '# loop-scoped slug\n');
+  writeFileSync(join(dir, 'hypothesis', 'renamed.md'), '---\nid: H-3\n---\nslug differs\n');
+  writeFileSync(
+    join(dir, 'stop-line', 'guard.md'),
+    '---\nlines:\n  - "no force push"\n  - no secrets\n---\n',
+  );
+  writeFileSync(join(dir, 'stop-line', 'single.md'), '---\nline: "tests red"\n---\n');
+  return dir;
+};
+
+test('ontology: every resolution rule accepts a valid reference (slug, scoped slug, frontmatter id, lines/line)', () => {
+  const cli = makeCli();
+  const ont = { FUKURO_ONTOLOGY: makeOntology() };
+  cli.runEnv(ont, 'log-event', 'loop_start', '--loop', 'L1');
+  cli.runEnv(ont, 'log-event', 'hypothesis_opened', '--loop', 'L1', '--id', 'H-1', '--claim', 'c');
+  cli.runEnv(ont, 'log-event', 'hypothesis_opened', '--loop', 'L1', '--id', 'H-2', '--claim', 'c');
+  cli.runEnv(ont, 'log-event', 'hypothesis_opened', '--loop', 'L1', '--id', 'H-3', '--claim', 'c');
+  cli.runEnv(ont, 'log-event', 'stop_line_hit', '--loop', 'L1', '--data', '{"line":"no secrets"}');
+  cli.runEnv(ont, 'log-event', 'stop_line_hit', '--loop', 'L1', '--data', '{"line":"tests red"}');
+  for (const id of ['H-1', 'H-2', 'H-3']) {
+    cli.runEnv(ont, 'log-event', 'hypothesis_confirmed', '--loop', 'L1', '--id', id);
+  }
+  cli.runEnv(ont, 'log-event', 'loop_end', '--loop', 'L1');
+  const res = spawnCliEnv(cli, ont, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('lint: no findings'));
+});
+
+test('ontology: unknown references warn once per distinct ref, with a suggested slug', () => {
+  const cli = makeCli();
+  const ont = { FUKURO_ONTOLOGY: makeOntology() };
+  cli.run('log-event', 'loop_start', '--loop', 'ghost');
+  cli.run('log-event', 'tick', '--loop', 'ghost'); // second event, same unknown loop
+  cli.run('log-event', 'hypothesis_opened', '--loop', 'ghost', '--id', 'H-9', '--claim', 'c');
+  cli.run('log-event', 'stop_line_hit', '--loop', 'ghost', '--data', '{"line":"Unheard Of"}');
+  const res = spawnCliEnv(cli, ont, 'lint');
+  assert.equal(res.status, 1);
+  assert.equal((res.stdout.match(/warn \[ontology-loop\]/g) ?? []).length, 1, 'deduped by ref');
+  assert.ok(res.stdout.includes('create loop/ghost.md'));
+  assert.ok(res.stdout.includes('create hypothesis/ghost-h-9.md'));
+  assert.ok(res.stdout.includes('or add "id: H-9"'));
+  assert.ok(res.stdout.includes('create stop-line/unheard-of.md'));
+  // same log, ontology unset: all reference checks are skipped
+  const off = spawnCli(cli, 'lint');
+  assert.equal(off.status, 0);
+  assert.ok(!off.stdout.includes('ontology'));
+});
+
+test('ontology: log-event accepts the write and warns on stderr (accept-then-warn)', () => {
+  const cli = makeCli();
+  const ont = { FUKURO_ONTOLOGY: makeOntology() };
+  const res = spawnCliEnv(cli, ont, 'log-event', 'loop_start', '--loop', 'ghost');
+  assert.equal(res.status, 0, 'an unknown reference must not refuse the write');
+  assert.ok(res.stdout.includes('logged #'));
+  assert.ok(res.stderr.includes('ontology:') && res.stderr.includes('create loop/ghost.md'));
+  const rows = cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number };
+  assert.equal(rows.n, 1);
+  // a resolvable reference stays silent
+  const ok = spawnCliEnv(cli, ont, 'log-event', 'loop_start', '--loop', 'L1');
+  assert.equal(ok.status, 0);
+  assert.ok(!ok.stderr.includes('ontology'));
 });
 
 test('--help / -h print help; unknown flags fail with one line, not a stack trace', () => {

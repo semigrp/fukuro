@@ -47,6 +47,10 @@ npx fukuro events --limit 20
 The CLI is deliberately agent-agnostic: call it from Claude Code hooks, Codex automations, CI, or
 your shell. Canonical event kinds are documented in [`spec/05-telemetry.md`](spec/05-telemetry.md).
 
+Optionally, point `$FUKURO_ONTOLOGY` at a markdown entity directory you own (`loop/`, `hypothesis/`,
+`stop-line/`; one `<slug>.md` per entity) and `lint`/`log-event` will warn about references to
+entities that don't exist — unset, nothing changes.
+
 ## Repository layout
 
 ```

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { openDb, dbPath, type EventRow } from './db.ts';
 import { deriveContext, deriveSession, suggestedKinds } from './derive.ts';
@@ -45,6 +46,11 @@ Usage:
                                            (orphan closes, unbalanced loops, ambiguous ids);
                                            exits 1 when anything warn-level is found
   fukuro help
+
+Ontology (opt-in):
+  $FUKURO_ONTOLOGY  Path to a markdown entity directory (loop/, hypothesis/, stop-line/;
+                    one <slug>.md per entity). When set, lint and log-event warn about
+                    references to entities that don't exist. Unset: no checks, no change.
 
 report options:
   --format <f>     text (default) / json / md — md is meant for export:
@@ -320,6 +326,17 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   db.close();
   const derivedNote = filled.length > 0 ? `  (derived: ${filled.join(' ')})` : '';
   console.log(`logged #${result.lastInsertRowid} ${kind}${derivedNote}`);
+  // Ontology references, accept-then-warn (#26): the event just written is
+  // checked inline (one event, cheap), but the write is never refused — an
+  // unknown reference is the natural moment to create the entity, so the
+  // warning suggests the slug instead of blocking a running loop.
+  const ontology = loadOntology();
+  if (ontology) {
+    const payload = data === null ? null : (JSON.parse(data) as Record<string, unknown>);
+    for (const f of referenceFindings(ontology, kind, loop, payload)) {
+      console.warn(`ontology: ${f.message}`);
+    }
+  }
   if (staleLoops.length > 0) {
     console.warn(
       `hoot: ${staleLoops.length} stale open loop(s): ${staleLoops
@@ -475,6 +492,106 @@ function deriveLedger(db: ReturnType<typeof openDb>): LedgerEntry[] {
   return entries;
 }
 
+// Ontology reference checks (#26): $FUKURO_ONTOLOGY points at a plain-markdown
+// entity directory the user owns — one <slug>.md per entity, one subdirectory
+// per type (loop/, hypothesis/, stop-line/). fukuro validates references into
+// it and nothing more: no schema beyond directory/slug.md (that belongs to the
+// ontology owner), no writes. Unset → every check is skipped (fully opt-in).
+interface Ontology {
+  dir: string;
+  loops: Set<string>;
+  hypothesisSlugs: Set<string>;
+  hypothesisIds: Set<string>; // frontmatter `id:` values, for slug-independent resolution
+  stopLines: Set<string>; // frontmatter `line:` values and `lines:` list entries
+}
+
+function readMdEntities(dir: string): { slug: string; text: string }[] {
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => ({ slug: f.slice(0, -3), text: readFileSync(join(dir, f), 'utf8') }));
+  } catch {
+    return []; // a missing type directory just means no entities of that type
+  }
+}
+
+const unquote = (s: string): string => s.trim().replace(/^(["'])(.*)\1$/, '$2');
+
+function loadOntology(): Ontology | null {
+  const dir = process.env.FUKURO_ONTOLOGY;
+  if (!dir) return null;
+  const hypotheses = readMdEntities(join(dir, 'hypothesis'));
+  const hypothesisIds = new Set<string>();
+  // Frontmatter is grepped naively (`id: X` / `line:` / `lines:` at line start) —
+  // deliberately no YAML parser; anything fancier belongs to the ontology owner.
+  for (const h of hypotheses) {
+    for (const m of h.text.matchAll(/^id:[ \t]*(.+)$/gm)) hypothesisIds.add(unquote(m[1]));
+  }
+  const stopLines = new Set<string>();
+  for (const s of readMdEntities(join(dir, 'stop-line'))) {
+    const single = s.text.match(/^line:[ \t]*(.+)$/m);
+    if (single) stopLines.add(unquote(single[1]));
+    const block = s.text.match(/^lines:[ \t]*\n((?:[ \t]*-[ \t]*.+\n?)+)/m);
+    if (block) for (const m of block[1].matchAll(/-[ \t]*(.+)/g)) stopLines.add(unquote(m[1]));
+  }
+  return {
+    dir,
+    loops: new Set(readMdEntities(join(dir, 'loop')).map((e) => e.slug)),
+    hypothesisSlugs: new Set(hypotheses.map((e) => e.slug)),
+    hypothesisIds,
+    stopLines,
+  };
+}
+
+const HYPOTHESIS_KINDS = ['hypothesis_opened', 'hypothesis_confirmed', 'hypothesis_refuted'];
+const slugify = (s: string): string =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unnamed';
+
+/**
+ * Reference checks for one event; shared by lint (whole db, distinct refs) and
+ * log-event (the row just written). A hypothesis id resolves via (a) its
+ * lowercased slug, (b) a loop-scoped `<loop>-<id>` slug (existing data where
+ * ids collide across loops), or (c) a frontmatter `id:` in any entity.
+ * Unknown references warn and suggest the slug to create — never an error:
+ * the write path for the noun side is exactly this moment.
+ */
+function referenceFindings(
+  ont: Ontology,
+  kind: string,
+  loop: string | null,
+  data: Record<string, unknown> | null,
+): LintFinding[] {
+  const findings: LintFinding[] = [];
+  const warn = (check: string, message: string): number =>
+    findings.push({ check, severity: 'warn', message });
+  if (loop !== null && !ont.loops.has(loop)) {
+    warn('ontology-loop', `loop "${loop}" has no entity — create loop/${loop}.md in $FUKURO_ONTOLOGY`);
+  }
+  const id = HYPOTHESIS_KINDS.includes(kind) && typeof data?.id === 'string' ? data.id : null;
+  if (id !== null) {
+    const lower = id.toLowerCase();
+    const resolved =
+      ont.hypothesisSlugs.has(lower) ||
+      (loop !== null && ont.hypothesisSlugs.has(`${loop}-${lower}`)) ||
+      ont.hypothesisIds.has(id);
+    if (!resolved) {
+      warn(
+        'ontology-hypothesis',
+        `hypothesis id "${id}"${loop === null ? '' : ` (loop ${loop})`} resolves to no entity — create ` +
+          `hypothesis/${loop === null ? '' : `${loop}-`}${lower}.md, or add "id: ${id}" to an existing entity's frontmatter`,
+      );
+    }
+  }
+  const line = kind === 'stop_line_hit' && typeof data?.line === 'string' ? data.line : null;
+  if (line !== null && !ont.stopLines.has(line)) {
+    warn(
+      'ontology-stop-line',
+      `stop line "${line}" matches no entity — create stop-line/${slugify(line)}.md with frontmatter line: "${line}"`,
+    );
+  }
+  return findings;
+}
+
 interface LintFinding {
   check: string;
   severity: 'warn' | 'info';
@@ -551,6 +668,39 @@ const LINT_CHECKS: LintCheck[] = [
       severity: 'info' as const,
       message: `hypothesis id ${r.hid} opened in ${r.n} loops (${r.loops}) — prefer globally unique ids going forward`,
     }));
+  },
+  // ontology-*: every reference in the log must resolve in $FUKURO_ONTOLOGY
+  // (skipped when unset). Distinct references only, deduped by message, so an
+  // unknown loop warns once however many events carry it — this is the
+  // backfill direction: entities created later reconcile against old events.
+  function ontologyReferences(db) {
+    const ont = loadOntology();
+    if (!ont) return [];
+    const findings: LintFinding[] = [];
+    const seen = new Set<string>();
+    const push = (fs: LintFinding[]): void => {
+      for (const f of fs) if (!seen.has(f.message)) { seen.add(f.message); findings.push(f); }
+    };
+    const loops = db
+      .prepare(`SELECT DISTINCT loop_id FROM events WHERE loop_id IS NOT NULL ORDER BY loop_id`)
+      .all() as unknown as { loop_id: string }[];
+    for (const r of loops) push(referenceFindings(ont, 'tick', r.loop_id, null));
+    const hyps = db
+      .prepare(
+        `SELECT DISTINCT loop_id, json_extract(data,'$.id') AS hid FROM events
+         WHERE kind IN (${HYPOTHESIS_KINDS.map(() => '?').join(',')})
+           AND json_extract(data,'$.id') IS NOT NULL ORDER BY hid`,
+      )
+      .all(...HYPOTHESIS_KINDS) as unknown as { loop_id: string | null; hid: string }[];
+    for (const r of hyps) push(referenceFindings(ont, 'hypothesis_opened', r.loop_id, { id: r.hid }));
+    const lines = db
+      .prepare(
+        `SELECT DISTINCT json_extract(data,'$.line') AS line FROM events
+         WHERE kind = 'stop_line_hit' AND json_extract(data,'$.line') IS NOT NULL ORDER BY line`,
+      )
+      .all() as unknown as { line: string }[];
+    for (const r of lines) push(referenceFindings(ont, 'stop_line_hit', null, { line: r.line }));
+    return findings;
   },
 ];
 
