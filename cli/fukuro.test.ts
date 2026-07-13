@@ -129,6 +129,50 @@ test('an explicit foreign --loop opts out of issue/pr autofill', () => {
   assert.deepEqual({ ...foreign }, { loop_id: 'B', issue: null, pr: null });
 });
 
+test('an explicit foreign --issue blocks branch-derived pr autofill (and vice versa)', () => {
+  const cli = makeCli();
+  const git = (args: string) =>
+    execSync(`git -c user.email=t@example.com -c user.name=t ${args}`, {
+      cwd: cli.dir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  git('init -q');
+  git('commit --allow-empty -q -m init');
+  git('checkout -q -b 7-feature');
+  cli.run('log-event', 'loop_start', '--loop', 'A');
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '7', '--pr', '9');
+
+  // closing a different issue from this branch must not inherit issue 7's PR
+  cli.run('log-event', 'issue_closed', '--issue', '8');
+  const closed = cli
+    .db()
+    .prepare(
+      "SELECT loop_id, issue, pr FROM events WHERE kind = 'issue_closed' ORDER BY id DESC LIMIT 1",
+    )
+    .get() as { loop_id: string; issue: number | null; pr: number | null };
+  assert.deepEqual({ ...closed }, { loop_id: 'A', issue: 8, pr: null });
+
+  // the matching issue keeps full autofill (coherent context is preserved)
+  cli.run('log-event', 'issue_closed', '--issue', '7');
+  const matching = cli
+    .db()
+    .prepare(
+      "SELECT loop_id, issue, pr FROM events WHERE kind = 'issue_closed' ORDER BY id DESC LIMIT 1",
+    )
+    .get() as { loop_id: string; issue: number | null; pr: number | null };
+  assert.deepEqual({ ...matching }, { loop_id: 'A', issue: 7, pr: 9 });
+
+  // symmetric guard: an explicit foreign --pr blocks branch-derived issue autofill
+  cli.run('log-event', 'review_round', '--pr', '11');
+  const round = cli
+    .db()
+    .prepare(
+      "SELECT loop_id, issue, pr FROM events WHERE kind = 'review_round' ORDER BY id DESC LIMIT 1",
+    )
+    .get() as { loop_id: string; issue: number | null; pr: number | null };
+  assert.deepEqual({ ...round }, { loop_id: 'A', issue: null, pr: 11 });
+});
+
 /** Seeds a merged-PR lifecycle with controlled timestamps for KPI assertions. */
 const seedMergedPr = (dbFile: string): void => {
   const db = new DatabaseSync(dbFile);

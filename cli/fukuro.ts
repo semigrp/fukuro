@@ -244,11 +244,17 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   const db = openDb();
 
   // Missing fields are filled from the derived context (explicit flags always win),
-  // with two guards against cross-loop misattribution:
+  // with coherence guards against cross-context misattribution — autofilled
+  // fields must all come from one coherent derived context:
   // - loop_start never autofills: an open previous loop (or the branch's issue/pr)
   //   must not be grafted onto the loop being started.
   // - an explicit --loop that differs from the derived loop opts out of issue/pr
   //   autofill too — those fields belong to the derived loop's context, not this one.
+  // - an explicit --issue that differs from the branch-derived issue blocks pr
+  //   autofill (the derived pr belongs to the branch's issue, not the stated one),
+  //   and an explicit --pr that differs from the derived pr blocks issue autofill.
+  //   Scar: one multi-PR day produced six events (issue closes, a finding) stamped
+  //   with a foreign branch's PR because only the loop guard existed.
   const needsDerivation =
     values.loop === undefined ||
     values.issue === undefined ||
@@ -259,13 +265,23 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     values.loop !== undefined &&
     derived?.loop != null &&
     values.loop !== derived.loop;
+  const explicitIssue = toInt('issue', values.issue);
+  const prNone = values.pr === 'none';
+  const explicitPr = prNone ? null : toInt('pr', values.pr);
+  const foreignIssue =
+    explicitIssue !== null &&
+    derived?.issue != null &&
+    explicitIssue !== derived.issue;
+  const foreignPr =
+    explicitPr !== null && derived?.pr != null && explicitPr !== derived.pr;
   const loop = values.loop ?? derived?.loop ?? null;
   const issue =
-    toInt('issue', values.issue) ?? (foreignLoop ? null : (derived?.issue ?? null));
-  const prNone = values.pr === 'none';
+    explicitIssue ??
+    (foreignLoop || foreignPr ? null : (derived?.issue ?? null));
   const pr = prNone
     ? null
-    : (toInt('pr', values.pr) ?? (foreignLoop ? null : (derived?.pr ?? null)));
+    : (explicitPr ??
+      (foreignLoop || foreignIssue ? null : (derived?.pr ?? null)));
 
   const filled: string[] = [];
   if (values.loop === undefined && loop !== null) filled.push(`loop=${loop}`);
