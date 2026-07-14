@@ -33,6 +33,12 @@ fukuro's thesis: **the return path is the compounding half**, and it only compou
 are *measured*, not self-graded by the same model that did the work. That is why the first shipped
 artifact here is a telemetry CLI, not another prompt library.
 
+Fukuro measures routing without becoming a second router. Native skill routing remains in control;
+a shadow omission evaluator may compare a task, an immutable derived skill index, observed skill
+use, and outcome evidence without changing the active run. Advisory or blocking behavior requires
+measured promotion gates and a later architecture decision
+([ADR 0008](docs/adr/0008-measure-native-skill-routing-before-introducing-a-gate.md)).
+
 ## Telemetry CLI (zero dependencies)
 
 Written in TypeScript and executed directly by Node — no build step, no runtime dependencies.
@@ -79,6 +85,8 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
    loop halts on them, escalating to a human.
 5. **Telemetry over rubrics.** Rubric self-scores saturate; review rounds per PR, lead time, and
    intervention counts do not. Improvements survive only if the metrics say so.
+6. **Evidence before gates.** Observe native behavior, label failures independently, and pass a
+   regression evaluation before adding advisory or blocking control to the execution path.
 
 ## What fukuro is not
 
@@ -87,6 +95,8 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
   not competing.
 - **Not a personal delivery dashboard.** DORA-style tools measure teams and pipelines; fukuro
   measures one harness and its return path.
+- **Not a second skill router.** Skill repositories own trigger descriptions and the harness owns
+  runtime selection. Fukuro measures omissions and manages reviewed improvement evidence.
 - **The CLI is the entry point, not the product.** Vendor-built telemetry will absorb usage/cost/PR
   counters from below. What fukuro defends is the vocabulary: *what counts as loop improvement* —
   review rounds, stop lines, interventions, hypothesis lifecycles, return-path attribution.
@@ -100,7 +110,10 @@ nothing stored), structural redaction (`--profile public`), lifecycle and refere
 checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in), hook recipes
 ([`docs/hooks.md`](docs/hooks.md)), and a maker≠checker pre-push gate recipe for direct-push repos
 ([`docs/checker.md`](docs/checker.md)). Roadmap: a GitHub-only golden-path example, a first-week
-adoption path, and outcome-based baseline guards for the return path.
+adoption path, the receiver-owned Ouro-to-Fukuro telemetry contract, a labelled native-routing
+baseline, and outcome-based guards for the return path. Routing evaluation starts offline and then
+runs in non-blocking shadow mode; advisory behavior is conditional on [ADR 0008's promotion
+gates](docs/adr/0008-measure-native-skill-routing-before-introducing-a-gate.md#rollout-and-promotion-gates).
 
 ## License
 

@@ -13,6 +13,7 @@ and intent.
 | [0005](0005-own-a-measured-return-path.md) | Accepted | Make the measured return path Fukuro's responsibility |
 | [0006](0006-use-an-append-only-local-telemetry-store.md) | Accepted | Use an append-only, local-first telemetry store |
 | [0007](0007-model-exploration-with-typed-units.md) | Accepted | Model exploration with Concept, Hypothesis, and Procedure units |
+| [0008](0008-measure-native-skill-routing-before-introducing-a-gate.md) | Accepted | Measure native skill routing before introducing a gate |
 
 ## Change policy
 
