@@ -17,7 +17,7 @@ Represent pre-implementation exploration with three typed units:
 | Unit | Question | Converges when | Typical failure |
 |---|---|---|---|
 | **Concept** | What is this phenomenon, and what do we call it? | The team reuses a named definition | Boundaries drift or one thing has several names |
-| **Hypothesis** | Is this claim true? | Confirmed, refuted, or explicitly still open, with evidence | Opinion substitutes for evidence or no closing condition exists |
+| **Hypothesis** | Is this claim true? | Confirmed or refuted with evidence; otherwise it remains open with an updated closing condition | Opinion substitutes for evidence or no closing condition exists |
 | **Procedure** | How do we execute this repeatably? | A stranger can follow steps, stop lines, and completion criteria | Knowledge remains author-specific |
 
 The units form a progression: a Concept sharpens vocabulary, a Hypothesis tests a claim in that
