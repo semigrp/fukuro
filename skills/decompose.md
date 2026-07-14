@@ -5,9 +5,11 @@ description: Turn a goal into a verifiable DAG and split the buildable from the 
 
 # decompose — goal → verifiable DAG (meta-skill)
 
-Decomposition is the *expand* phase (spec/02): one goal → a dependency DAG whose nodes are units
-small enough to verify. This skill is the generic procedure; the goal arrives at runtime. It ships
-as a generator, not a fixed plan — you supply the goal, it produces the DAG and the issues.
+Decomposition is the *expand* phase
+([ADR 0003](../docs/adr/0003-store-decomposition-dags-in-the-issue-tracker.md)): one goal →
+a dependency DAG whose nodes are units small enough to verify. This skill is the generic
+procedure; the goal arrives at runtime. It ships as a generator, not a fixed plan — you supply the
+goal, it produces the DAG and the issues.
 
 The hard part is not drawing the graph. It is **not fooling yourself about what you know.** The
 rules below all exist because real runs failed in specific ways; each is a scar.
@@ -77,4 +79,5 @@ synthesis.
 - Cutting an issue on an assumed/unverified contract → stop, verify or mark blocked.
 - Inferring a state marker instead of transcribing it → stop, quote the source.
 - Filing issues before the human approved the DAG → stop.
-- Publishing the DAG externally with host-identifying content → use redacted export (spec/05).
+- Publishing the DAG externally with host-identifying content → use redacted export
+  ([ADR 0006](../docs/adr/0006-use-an-append-only-local-telemetry-store.md)).

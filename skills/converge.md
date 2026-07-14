@@ -5,10 +5,11 @@ description: Run one decomposed unit from started to merged through stateless ti
 
 # converge — the stateless tick (meta-skill)
 
-Convergence is the *contract* phase (spec/03): one unit travels implement → verify → review →
-merged. This skill is the generic discipline; the unit and the machinery (gates, reviewers, merge
-authority) arrive from your bootstrap-generated loop definition. As with every meta-skill here,
-the rules exist because real runs failed in specific ways; each is a scar.
+Convergence is the *contract* phase ([ADR 0004](../docs/adr/0004-run-convergence-as-stateless-gated-ticks.md)):
+one unit travels implement → verify → review → merged. This skill is the generic discipline; the
+unit and the machinery (gates, reviewers, merge authority) arrive from your bootstrap-generated
+loop definition. As with every meta-skill here, the rules exist because real runs failed in
+specific ways; each is a scar.
 
 ## The tick
 
@@ -61,7 +62,8 @@ Two situations end a tick with a recorded event instead of an action:
 A stop-line hit is the third variant: a named forbidden condition from your loop definition
 (irreversible actions without approval, credential/PII boundaries, repeated non-convergence).
 Record `stop_line_hit --data '{"line":...,"cause":...}'` and halt the unit — the event is
-simultaneously a brake and a signal that the tree has a hole (spec/04).
+simultaneously a brake and a signal that the tree has a hole
+([ADR 0005](../docs/adr/0005-own-a-measured-return-path.md)).
 
 ## Pacing
 
@@ -70,7 +72,10 @@ imminent (CI running, review requested moments ago); long intervals when idle. I
 a context-cache TTL, pace against it — sleeping just past the TTL pays the worst rate. The policy
 belongs in your loop definition; converge just obeys it.
 
-## Telemetry wiring (spec/05, spec/06)
+## Telemetry wiring
+
+See [ADR 0006](../docs/adr/0006-use-an-append-only-local-telemetry-store.md) and
+[ADR 0007](../docs/adr/0007-model-exploration-with-typed-units.md).
 
 `loop_start` when the unit begins → `tick` per cycle → `pr_opened` → `review_round` per
 reviewer-response boundary → `merged` / `issue_closed` → `loop_end`. Findings and hypotheses

@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 
 /**
- * Stateless context derivation (spec: "derive, don't store").
+ * Stateless context derivation (ADR 0004: derive, don't store).
  * The current position in the decomposition tree is recomputed on every call
  * from facts that already exist — git state and the append-only event log.
  * Nothing here is cached or persisted, so it cannot drift.

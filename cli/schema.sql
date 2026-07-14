@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS events (
   loop_id TEXT,             -- logical loop name (e.g. parent issue slug)
   issue   INTEGER,          -- issue number, if applicable
   pr      INTEGER,          -- pull request number, if applicable
-  kind    TEXT NOT NULL,    -- canonical kinds: see spec/05-telemetry.md
+  kind    TEXT NOT NULL,    -- canonical kinds: see docs/adr/0006-use-an-append-only-local-telemetry-store.md
   data    TEXT              -- JSON payload (validated at write time)
 );
 
