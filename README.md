@@ -5,16 +5,18 @@
 > and the system that ran the work turns around and improves *itself*.
 > Also a pun: **fukurō** (梟) is the owl — the thing that watches your loops at night.
 
-**fukuro** is a specification and minimal tooling for *agentic loop engineering* — running AI coding
-agents (Claude, Codex, or anything else) as designed loops rather than interactive prompts.
+**fukuro** is a set of architecture decisions and minimal tooling for *agentic loop engineering* —
+running AI coding agents (Claude, Codex, or anything else) as designed loops rather than
+interactive prompts.
 
 ## The model: three layers + a return path
 
 Most discussion of loop engineering enumerates ingredients (automations, worktrees, skills,
 connectors, sub-agents, external state). fukuro maps them into layers with distinct jobs — and
-deliberately **owns only the last one**. Delegation is the design ([`spec/00`](spec/00-overview.md)):
-each outbound structure lives where its write path is already automatic, because structures that
-demand manual upkeep starve.
+deliberately **owns only the last one**. Delegation is the design
+([ADR 0001](docs/adr/0001-separate-three-outbound-layers-and-a-return-path.md)): each outbound
+structure lives where its write path is already automatic, because structures that demand manual
+upkeep starve.
 
 | Layer | Question it answers | Structure | Where it lives |
 |---|---|---|---|
@@ -49,7 +51,8 @@ npx fukuro lint                                                # integrity check
 ```
 
 The CLI is deliberately agent-agnostic: call it from Claude Code hooks, Codex automations, CI, or
-your shell. Canonical event kinds are documented in [`spec/05-telemetry.md`](spec/05-telemetry.md).
+your shell. Canonical event kinds are documented in
+[ADR 0006](docs/adr/0006-use-an-append-only-local-telemetry-store.md).
 
 Optionally, point `$FUKURO_ONTOLOGY` at a markdown entity directory you own (`loop/`, `hypothesis/`,
 `stop-line/`; one `<slug>.md` per entity) and `lint`/`log-event` will warn about references to
@@ -58,7 +61,7 @@ entities that don't exist — unset, nothing changes.
 ## Repository layout
 
 ```
-spec/       The written specification (chapters 00–06)
+docs/adr/   Accepted architecture decisions and their index
 cli/        The telemetry CLI (node:sqlite, no deps)
 skills/     Reference templates for the delegated outbound side (bootstrap / decompose / converge / instrument)
 examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
@@ -90,14 +93,14 @@ examples/   Minimal end-to-end loop using GitHub Issues only (WIP)
 
 ## Status
 
-Early. The spec chapters are drafted; the CLI covers `init` / `ctx` / `log-event` / `events` /
-`report` / `lint` — including stateless context derivation (position recomputed from git and the
-event log; nothing stored), structural redaction (`--profile public`), lifecycle and
-reference-integrity checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in),
-hook recipes ([`docs/hooks.md`](docs/hooks.md)), and a maker≠checker pre-push gate recipe for
-direct-push repos ([`docs/checker.md`](docs/checker.md)). Roadmap: a GitHub-only golden-path example,
-a first-week adoption path, correction markers for the append-only log, and outcome-based
-baseline guards for the return path.
+Early. The core architecture decisions are accepted and indexed in
+[`docs/adr/`](docs/adr/README.md); the CLI covers `init` / `ctx` / `log-event` / `events` / `report`
+/ `lint` — including stateless context derivation (position recomputed from git and the event log;
+nothing stored), structural redaction (`--profile public`), lifecycle and reference-integrity
+checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in), hook recipes
+([`docs/hooks.md`](docs/hooks.md)), and a maker≠checker pre-push gate recipe for direct-push repos
+([`docs/checker.md`](docs/checker.md)). Roadmap: a GitHub-only golden-path example, a first-week
+adoption path, and outcome-based baseline guards for the return path.
 
 ## License
 

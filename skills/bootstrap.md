@@ -61,8 +61,9 @@ human before finalizing.
    of truth; quality gates from Phase 1; review-response procedure; pacing rules), parameterized
    with the *discovered* reviewer bots and merge mechanism.
 3. **Conventions**: branch naming, loop naming (loop id = parent issue slug), which fukuro kinds
-   fire at which moments (see `spec/05` and `spec/06`), `FUKURO_SESSION` setup, hook recipes from
-   `docs/hooks.md`.
+   fire at which moments (see [ADR 0006](../docs/adr/0006-use-an-append-only-local-telemetry-store.md)
+   and [ADR 0007](../docs/adr/0007-model-exploration-with-typed-units.md)),
+   `FUKURO_SESSION` setup, hook recipes from `docs/hooks.md`.
 4. **Telemetry wiring**: `fukuro init`; confirm `fukuro ctx` derives correctly on a real branch.
 
 ## Phase 4 — verify by running one small loop

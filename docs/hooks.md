@@ -2,7 +2,8 @@
 
 Manual logging degrades — sessions get dropped, flags drift (observed on day one of dogfooding).
 The fix is structural: let the **harness** fire `fukuro log-event` at the moments that matter,
-and let context derivation (`fukuro ctx`, spec: derive-don't-store) fill in the fields.
+and let context derivation (`fukuro ctx`, the derive-don't-store rule from
+[ADR 0004](adr/0004-run-convergence-as-stateless-gated-ticks.md)) fill in the fields.
 
 Principles:
 
