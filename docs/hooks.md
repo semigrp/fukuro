@@ -11,6 +11,8 @@ Principles:
   receives events. No API clients, no daemons.
 - With derivation in place, a hook only decides **when** to fire — the **what** (loop, issue, PR)
   comes from the branch name and the event log.
+- Observation hooks fail open. A telemetry or evaluator failure must not block the workload it
+  was meant to observe.
 
 ## Session stamping
 
@@ -81,9 +83,31 @@ Merges are best captured by the loop itself (the tick that observes `state: MERG
 - run: fukuro log-event merged --pr "${{ github.event.pull_request.number }}"
 ```
 
+## Codex: shadow routing observation
+
+[ADR 0008](adr/0008-measure-native-skill-routing-before-introducing-a-gate.md) permits automatic
+routing assessment only in shadow mode. After Fukuro publishes the receiver-owned assessment
+contract, a Codex adapter may use task-submission and run-completion lifecycle hooks to capture
+artifact references and enqueue an assessment. It should return immediately and perform the
+evaluation outside the active tool path.
+
+This is a design boundary, not an executable recipe yet. The current CLI has no routing-assessment
+contract, and raw evaluator output must not be disguised as a generic `finding`. A recipe belongs
+here only after it can preserve the task reference, immutable SkillIndex digest, evaluator version,
+observed skill-use evidence, and outcome reference required by ADR 0008.
+
+During the shadow phase, do not use pre-tool, permission, or context-injection hooks for routing.
+The evaluator observes whether native routing omitted a required skill; it does not repair the
+active run. Advisory behavior is a later phase, and blocking behavior requires another ADR.
+
 ## What not to hook
 
 - `tick` — the loop's own heartbeat is the loop's responsibility; hooking it would count
   unrelated tool calls as loop work.
 - Exploration units (`hypothesis_*`, `concept_captured`) — these are judgments, not mechanical
   moments; auto-firing them would produce noise with no closing semantics.
+- LLM evaluation after every tool call — it adds cost and latency while coupling observation to
+  the path being observed.
+- Routing gates or automatic skill injection — shadow assessments have not earned control of the
+  active run.
+- Permission approval — telemetry and routing assessment never grant capabilities.
