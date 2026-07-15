@@ -55,20 +55,35 @@ everything else is derived.
 ### Variant: attach diff stats (unit-size KPI)
 
 Principle 3 (small verifiable units, ~100 changed lines) is measured by `report` from
-`data.additions`/`data.deletions` on `pr_opened`/`merged` events. `gh pr view <n> --json
-additions,deletions` prints exactly the payload shape `--data` expects, so the same hook grows by
-one call:
+`data.additions`/`data.deletions` on `pr_opened`/`merged` events. `gh pr view <url> --json
+additions,deletions` prints exactly the payload shape `--data` expects.
+
+Pass the **full PR URL** to `gh pr view`, not the bare number: the hook process inherits the
+session's working directory, which in a multi-repo parent dir is not the repo the PR belongs to —
+`gh pr view <n>` fails there while the URL form works from anywhere (observed during dogfooding).
 
 ```json
 {
   "type": "command",
-  "command": "jq -r 'select(.tool_input.command | test(\"gh pr create\")) | .tool_response.stdout // empty' | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1 | xargs -I{} sh -c 'fukuro log-event pr_opened --pr {} --data \"$(gh pr view {} --json additions,deletions)\"'"
+  "command": "{ jq -r 'select(.tool_input.command|test(\"gh pr create\")) | .tool_response.stdout // empty' | grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' | head -1 | { read -r url || exit 0; fukuro log-event pr_opened --pr \"${url##*/}\" --data \"$(gh pr view \"$url\" --json additions,deletions)\"; }; } 2>/dev/null || true"
 }
 ```
 
-The same works at merge time: fetch the final stats and attach them to the `merged` event — the
-report uses the latest sized event per PR, so a unit that grew during review is measured at its
-merged size.
+The same works at merge time — the report uses the latest sized event per PR, so a unit that grew
+during review is measured at its merged size. The merge command usually names the PR as an
+argument rather than printing a URL, so extract it from `tool_input.command` (URL form, or
+number + `--repo`):
+
+```json
+{
+  "type": "command",
+  "command": "{ c=$(jq -r 'select(.tool_input.command|test(\"gh pr merge\")) | .tool_input.command'); [ -n \"$c\" ] || exit 0; url=$(printf '%s' \"$c\" | grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' | head -1); if [ -z \"$url\" ]; then n=$(printf '%s' \"$c\" | grep -oE 'merge +[0-9]+' | grep -oE '[0-9]+' | head -1); r=$(printf '%s' \"$c\" | grep -oE '(--repo|-R) +[^ ]+' | head -1 | awk '{print $2}'); if [ -n \"$n\" ] && [ -n \"$r\" ]; then url=\"https://github.com/$r/pull/$n\"; fi; fi; [ -n \"$url\" ] || exit 0; fukuro log-event merged --pr \"${url##*/}\" --data \"$(gh pr view \"$url\" --json additions,deletions)\"; } 2>/dev/null || true"
+}
+```
+
+A bare `gh pr merge` on the current branch carries neither URL nor number; the hook exits quietly.
+That gap is acceptable — the loop's own tick that observes `state: MERGED` still logs `merged`
+(see below), just without size data.
 
 Adapt the extraction to your harness's hook payload shape — the pattern is: *detect the moment,
 extract the one fact derivation can't know yet, log.*
