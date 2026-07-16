@@ -24,7 +24,9 @@ const results = [];
 let failed = false;
 for (const command of commands) {
   if (!Array.isArray(command) || command.length === 0) {
-    console.error(`quality-gate: malformed command entry: ${JSON.stringify(command)}`);
+    console.error(
+      `quality-gate: malformed command entry: ${JSON.stringify(command)}`,
+    );
     process.exit(2);
   }
   const started = Date.now();
@@ -45,5 +47,5 @@ for (const command of commands) {
   }
 }
 
-console.log(JSON.stringify({ ok: !failed, results }, null, 2));
+process.stdout.write(`${JSON.stringify({ ok: !failed, results }, null, 2)}\n`);
 process.exit(failed ? 1 : 0);
