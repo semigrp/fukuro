@@ -761,3 +761,46 @@ test('--help / -h print help; unknown flags fail with one line, not a stack trac
     assert.ok(!/\n\s+at /.test(stderr), 'stderr must not contain a stack trace');
   }
 });
+
+test('--at records the historical instant and auto-marks a declared amendment', () => {
+  const cli = makeCli();
+  const note = spawnCli(cli, 'log-event', 'tick', '--at', '2026-01-05T12:00:00+09:00');
+  assert.equal(note.status, 0);
+  assert.ok(note.stderr.includes('auto-marked data.backfill=true'));
+  const row = cli.db().prepare('SELECT ts, data FROM events').get() as { ts: string; data: string };
+  assert.equal(row.ts, '2026-01-05T03:00:00.000Z'); // normalized to UTC in the schema's shape
+  assert.equal(JSON.parse(row.data).backfill, true);
+});
+
+test('--at accepts unix epoch and keeps an explicit amendment key unmarked', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_end', '--loop', 'L1', '--at', '1735689600', '--data', '{"supersedes":7}');
+  const row = cli.db().prepare('SELECT ts, data FROM events').get() as { ts: string; data: string };
+  assert.equal(row.ts, '2025-01-01T00:00:00.000Z');
+  const data = JSON.parse(row.data) as { supersedes: number; backfill?: boolean };
+  assert.equal(data.supersedes, 7);
+  assert.equal(data.backfill, undefined);
+});
+
+test('--at refuses future instants and unparsable input, writing nothing', () => {
+  const cli = makeCli();
+  cli.run('init'); // refusal happens before openDb, so create the table for the count
+  const future = spawnCli(cli, 'log-event', 'tick', '--at', '2999-01-01');
+  assert.equal(future.status, 1);
+  assert.ok(future.stderr.includes('must be in the past'));
+  const junk = spawnCli(cli, 'log-event', 'tick', '--at', 'not-a-time');
+  assert.equal(junk.status, 1);
+  assert.ok(junk.stderr.includes('not a recognizable instant'));
+  const n = (cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+  assert.equal(n, 0);
+});
+
+test('--at backfills a missing opened behind a historical close, lint-clean', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'hypothesis_confirmed', '--loop', 'L1', '--id', 'H-9', '--evidence', 'done');
+  const before = spawnCli(cli, 'lint');
+  assert.equal(before.status, 1); // orphan close warns until the opened exists
+  cli.run('log-event', 'hypothesis_opened', '--loop', 'L1', '--id', 'H-9', '--claim', 'c', '--at', '2026-01-01');
+  const after = spawnCli(cli, 'lint');
+  assert.equal(after.status, 0, after.stdout + after.stderr);
+});

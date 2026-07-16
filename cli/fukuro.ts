@@ -73,6 +73,11 @@ log-event options:
   --evidence <t>   Sugar for data.evidence (closing evidence)
   --closes-when <t> Sugar for data.closes_when (closing condition)
                    Sugar flags merge into --data and win on key conflicts
+  --at <ts>        Record the event at a historical instant (ISO 8601 or unix
+                   epoch seconds/ms; future instants are refused). Unless the
+                   payload already declares an amendment (backfill, supersedes
+                   or re_record), data.backfill=true is added automatically so
+                   ledger and lint treat the row as a declared correction
 
 Canonical kinds:
   ${[...CANONICAL_KINDS].join(' ')}
@@ -88,6 +93,7 @@ interface CliValues {
   claim?: string;
   evidence?: string;
   'closes-when'?: string;
+  at?: string;
   days: string;
   limit: string;
   json: boolean;
@@ -138,6 +144,7 @@ function main(): void {
       claim: { type: 'string' },
       evidence: { type: 'string' },
       'closes-when': { type: 'string' },
+      at: { type: 'string' },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -201,10 +208,48 @@ function toInt(name: string, value: string | undefined): number | null {
   return n;
 }
 
+/**
+ * Parses --at into the schema's canonical UTC format (`YYYY-MM-DDTHH:MM:SS.sssZ`,
+ * the shape strftime('%Y-%m-%dT%H:%M:%fZ') writes). Accepts ISO 8601 (date or
+ * datetime, any offset) and unix epoch in seconds or milliseconds. Returns null
+ * when the input is not a recognizable instant.
+ */
+function normalizeAt(input: string): string | null {
+  const trimmed = input.trim();
+  let ms: number;
+  if (/^\d{10}$/.test(trimmed)) ms = Number(trimmed) * 1000;
+  else if (/^\d{13}$/.test(trimmed)) ms = Number(trimmed);
+  else {
+    const parsed = Date.parse(trimmed);
+    if (Number.isNaN(parsed)) return null;
+    ms = parsed;
+  }
+  return new Date(ms).toISOString();
+}
+
 function logEvent(kind: string | undefined, values: CliValues): void {
   if (!kind) {
     console.error('log-event requires a <kind> argument');
     process.exit(1);
+  }
+  // --at: fix history by *declared* amendment, never by editing rows (#32).
+  // The instant must be in the past — --at documents what already happened,
+  // it does not schedule. The amendment marker (added below, after the data
+  // payload is assembled) keeps backfilled rows self-declaring, so ledger and
+  // lint pair them by event time instead of insertion order.
+  let at: string | null = null;
+  if (values.at !== undefined) {
+    at = normalizeAt(values.at);
+    if (at === null) {
+      console.error(
+        `--at is not a recognizable instant: ${values.at} (ISO 8601 or unix epoch seconds/ms)`,
+      );
+      process.exit(1);
+    }
+    if (Date.parse(at) > Date.now()) {
+      console.error(`--at must be in the past (got ${at}) — backfills document history, not plans`);
+      process.exit(1);
+    }
   }
   if (!CANONICAL_KINDS.has(kind)) {
     console.warn(`warning: "${kind}" is not a canonical kind (accepted anyway)`);
@@ -240,6 +285,25 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     data = JSON.stringify({ ...((parsed as Record<string, unknown>) ?? {}), ...sugar });
   } else if (parsed !== undefined) {
     data = JSON.stringify(parsed);
+  }
+  // A historical write must be self-declaring: unless the payload already
+  // carries an amendment key (backfill / supersedes / re_record), mark it.
+  if (at !== null) {
+    const obj: unknown = data !== null ? JSON.parse(data) : {};
+    if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+      console.error('--data must be a JSON object when combined with --at');
+      process.exit(1);
+    }
+    const payload = obj as Record<string, unknown>;
+    if (
+      payload.backfill === undefined &&
+      payload.supersedes === undefined &&
+      payload.re_record === undefined
+    ) {
+      payload.backfill = true;
+      console.error('note: --at auto-marked data.backfill=true (declared amendment)');
+    }
+    data = JSON.stringify(payload);
   }
   const db = openDb();
 
@@ -321,19 +385,20 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     }
   }
 
-  const result = db
-    .prepare(
-      `INSERT INTO events (session, loop_id, issue, pr, kind, data)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      values.session ?? deriveSession(),
-      loop,
-      issue,
-      pr,
-      kind,
-      data,
-    );
+  const result =
+    at !== null
+      ? db
+          .prepare(
+            `INSERT INTO events (ts, session, loop_id, issue, pr, kind, data)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(at, values.session ?? deriveSession(), loop, issue, pr, kind, data)
+      : db
+          .prepare(
+            `INSERT INTO events (session, loop_id, issue, pr, kind, data)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(values.session ?? deriveSession(), loop, issue, pr, kind, data);
   // Write-time nudge on the hoot channel: starting a loop is the natural
   // moment to notice siblings that were never closed. The loop just started
   // has fresh activity, so it can never appear in its own nudge.
@@ -652,7 +717,7 @@ const LINT_CHECKS: LintCheck[] = [
       severity: 'warn' as const,
       message:
         `event #${r.id} ${r.kind} (id=${r.hid ?? 'missing'}, loop=${r.loop_id ?? '-'}) has no prior hypothesis_opened — ` +
-        `backfill: fukuro log-event hypothesis_opened --loop ${r.loop_id ?? '<loop>'} --id ${r.hid ?? '<id>'} --claim "..." --data '{"backfill":true}'`,
+        `backfill: fukuro log-event hypothesis_opened --loop ${r.loop_id ?? '<loop>'} --id ${r.hid ?? '<id>'} --claim "..." --at <when it was opened> (auto-marks data.backfill)`,
     }));
   },
   // unbalanced-loop: more ends than starts for one loop_id — a double-close,
