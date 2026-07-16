@@ -111,8 +111,9 @@ nothing stored), structural redaction (`--profile public`), lifecycle and refere
 checks against a user-owned entity directory (`$FUKURO_ONTOLOGY`, opt-in), hook recipes
 ([`docs/hooks.md`](docs/hooks.md)), and a maker≠checker pre-push gate recipe for direct-push repos
 ([`docs/checker.md`](docs/checker.md)). Roadmap: a GitHub-only golden-path example, a first-week
-adoption path, the receiver-owned Ouro-to-Fukuro telemetry contract, a labelled native-routing
-baseline, and outcome-based guards for the return path. Routing evaluation starts offline and then
+adoption path, a labelled native-routing baseline, and outcome-based guards for the return
+path. The receiver-owned telemetry import contract shipped in 0.6 (`fukuro import`) and is
+in production use by ouro (gate evidence) and junro (human-correction events). Routing evaluation starts offline and then
 runs in non-blocking shadow mode; advisory behavior is conditional on [ADR 0008's promotion
 gates](docs/adr/0008-measure-native-skill-routing-before-introducing-a-gate.md#rollout-and-promotion-gates).
 
