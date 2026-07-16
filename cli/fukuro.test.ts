@@ -804,3 +804,70 @@ test('--at backfills a missing opened behind a historical close, lint-clean', ()
   const after = spawnCli(cli, 'lint');
   assert.equal(after.status, 0, after.stdout + after.stderr);
 });
+
+const telemetryLine = (over: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    schema: 'fukuro.telemetry-event/v1',
+    source: 'ouro',
+    sourceEventId: 'EVT-000001',
+    occurredAt: '2026-01-02T03:04:05.000Z',
+    kind: 'loop_start',
+    subject: { system: 'ouro', type: 'run', id: 'RUN-0001', version: '1' },
+    refs: [{ system: 'github', type: 'issue', id: 'o/r#5', version: '1' }],
+    data: { status: 'running' },
+    ...over,
+  });
+
+test('import ingests producer NDJSON: ts from occurredAt, loop from subject, issue from refs', () => {
+  const cli = makeCli();
+  const file = join(cli.dir, 'events.ndjson');
+  writeFileSync(
+    file,
+    [
+      telemetryLine(),
+      telemetryLine({ sourceEventId: 'EVT-000002', kind: 'loop_end', occurredAt: '2026-01-02T03:09:05.000Z' }),
+    ].join('\n') + '\n',
+  );
+  const out = cli.run('import', '--file', file);
+  assert.ok(out.includes('2 imported, 0 skipped'), out);
+  const rows = cli
+    .db()
+    .prepare('SELECT ts, loop_id, issue, kind, data FROM events ORDER BY id')
+    .all() as { ts: string; loop_id: string; issue: number; kind: string; data: string }[];
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].ts, '2026-01-02T03:04:05.000Z');
+  assert.equal(rows[0].loop_id, 'ouro:RUN-0001');
+  assert.equal(rows[0].issue, 5);
+  assert.equal(JSON.parse(rows[0].data).sourceEventId, 'EVT-000001');
+  // the imported pair is a clean ledger citizen
+  const lint = spawnCli(cli, 'lint');
+  assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+});
+
+test('import is idempotent on (source, sourceEventId)', () => {
+  const cli = makeCli();
+  const file = join(cli.dir, 'events.ndjson');
+  writeFileSync(file, telemetryLine() + '\n');
+  cli.run('import', '--file', file);
+  const again = cli.run('import', '--file', file);
+  assert.ok(again.includes('0 imported, 1 skipped'), again);
+  const n = (cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+  assert.equal(n, 1);
+});
+
+test('import rejects malformed, foreign-schema, and future-stamped lines with exit 1', () => {
+  const cli = makeCli();
+  const file = join(cli.dir, 'events.ndjson');
+  writeFileSync(
+    file,
+    [
+      'not json',
+      JSON.stringify({ schema: 'other/v1', source: 'x', sourceEventId: '1', occurredAt: '2026-01-01', kind: 'k' }),
+      telemetryLine({ occurredAt: '2999-01-01T00:00:00.000Z' }),
+      telemetryLine({ sourceEventId: 'EVT-OK' }),
+    ].join('\n'),
+  );
+  const res = spawnCli(cli, 'import', '--file', file);
+  assert.equal(res.status, 1);
+  assert.ok(res.stdout.includes('1 imported, 0 skipped (already present), 3 rejected'), res.stdout);
+});

@@ -54,6 +54,7 @@ npx fukuro report --days 7
 npx fukuro report --format md --out ~/vault/fukuro-weekly.md   # export: Obsidian/Notion/GitHub
 npx fukuro events --limit 20
 npx fukuro lint                                                # integrity checks on the event log
+npx fukuro import --file events.ndjson                         # ingest fukuro.telemetry-event/v1 from a producer
 ```
 
 The CLI is deliberately agent-agnostic: call it from Claude Code hooks, Codex automations, CI, or

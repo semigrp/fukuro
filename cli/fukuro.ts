@@ -45,6 +45,12 @@ Usage:
   fukuro lint [--json]                     Check the whole event log for lifecycle anomalies
                                            (orphan closes, unbalanced loops, ambiguous ids);
                                            exits 1 when anything warn-level is found
+  fukuro import [--file <path>]            Ingest fukuro.telemetry-event/v1 NDJSON (stdin by
+                                           default) from an external producer. Events keep the
+                                           source-stamped occurredAt as ts, derive loop_id as
+                                           <source>:<subject.id>, and are idempotent on
+                                           (source, sourceEventId) — re-imports skip. The
+                                           contract lives in contracts/telemetry-event.v1
   fukuro help
 
 Ontology (opt-in):
@@ -94,6 +100,7 @@ interface CliValues {
   evidence?: string;
   'closes-when'?: string;
   at?: string;
+  file?: string;
   days: string;
   limit: string;
   json: boolean;
@@ -145,6 +152,7 @@ function main(): void {
       evidence: { type: 'string' },
       'closes-when': { type: 'string' },
       at: { type: 'string' },
+      file: { type: 'string' },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -179,6 +187,8 @@ function main(): void {
       return logEvent(positionals[1], cli);
     case 'events':
       return listEvents(cli);
+    case 'import':
+      return importEvents(cli);
     case 'report':
       return report(cli);
     case 'lint':
@@ -206,6 +216,106 @@ function toInt(name: string, value: string | undefined): number | null {
     process.exit(1);
   }
   return n;
+}
+
+/**
+ * Ingests fukuro.telemetry-event/v1 NDJSON from an external producer (#39).
+ * The receiver owns the contract (contracts/telemetry-event.v1.schema.json);
+ * producers vendor snapshots and export deterministically, so import must be
+ * idempotent: (source, sourceEventId) is the identity, re-imports skip.
+ * occurredAt is source-stamped history and becomes ts directly — this is a
+ * first recording, not a correction, so no amendment marker is added. Each
+ * producer subject becomes its own loop (`<source>:<subject.id>`), which
+ * makes a producer run's loop_start/tick/loop_end pair in ledgers and KPIs
+ * like any native loop. Refs are not stored: the producer keeps its own log,
+ * fukuro only needs the analysis columns (github issue/pull refs with a
+ * numeric tail fill issue/pr).
+ */
+function importEvents(values: CliValues): void {
+  let raw: string;
+  try {
+    raw = readFileSync(values.file !== undefined ? values.file : 0, 'utf8');
+  } catch (error) {
+    console.error(
+      `import: cannot read ${values.file ?? 'stdin'}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  }
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const db = openDb();
+  const exists = db.prepare(
+    `SELECT 1 FROM events
+     WHERE json_extract(data,'$.source') = ? AND json_extract(data,'$.sourceEventId') = ?
+     LIMIT 1`,
+  );
+  const insert = db.prepare(
+    `INSERT INTO events (ts, session, loop_id, issue, pr, kind, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const session = values.session ?? deriveSession();
+  let imported = 0;
+  let skipped = 0;
+  let rejected = 0;
+  for (const line of lines) {
+    let ev: unknown;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      rejected += 1;
+      continue;
+    }
+    const e = ev as Record<string, unknown>;
+    const valid =
+      typeof ev === 'object' &&
+      ev !== null &&
+      e.schema === 'fukuro.telemetry-event/v1' &&
+      typeof e.source === 'string' &&
+      e.source.length > 0 &&
+      typeof e.sourceEventId === 'string' &&
+      e.sourceEventId.length > 0 &&
+      typeof e.kind === 'string' &&
+      e.kind.length > 0 &&
+      typeof e.occurredAt === 'string';
+    const at = valid ? normalizeAt(e.occurredAt as string) : null;
+    if (!valid || at === null || Date.parse(at) > Date.now()) {
+      rejected += 1;
+      continue;
+    }
+    if (exists.get(e.source as string, e.sourceEventId as string) !== undefined) {
+      skipped += 1;
+      continue;
+    }
+    const subject = e.subject as Record<string, unknown> | undefined;
+    const subjectId = typeof subject?.id === 'string' ? subject.id : null;
+    const loop = subjectId !== null ? `${e.source}:${subjectId}` : null;
+    let issue: number | null = null;
+    let pr: number | null = null;
+    for (const ref of Array.isArray(e.refs) ? (e.refs as Record<string, unknown>[]) : []) {
+      if (ref?.system !== 'github' || typeof ref.id !== 'string') continue;
+      const tail = ref.id.match(/#(\d+)$/);
+      if (tail === null) continue;
+      if (ref.type === 'issue' && issue === null) issue = Number(tail[1]);
+      if ((ref.type === 'pull_request' || ref.type === 'pr') && pr === null) pr = Number(tail[1]);
+    }
+    const payload =
+      typeof e.data === 'object' && e.data !== null && !Array.isArray(e.data)
+        ? (e.data as Record<string, unknown>)
+        : {};
+    const data = JSON.stringify({
+      ...payload,
+      source: e.source,
+      sourceEventId: e.sourceEventId,
+      ...(subject !== undefined ? { subject } : {}),
+    });
+    insert.run(at, session, loop, issue, pr, e.kind as string, data);
+    imported += 1;
+  }
+  db.close();
+  console.log(`import: ${imported} imported, ${skipped} skipped (already present), ${rejected} rejected`);
+  if (rejected > 0) process.exitCode = 1;
 }
 
 /**
