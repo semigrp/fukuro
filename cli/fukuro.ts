@@ -873,6 +873,36 @@ const LINT_CHECKS: LintCheck[] = [
       message: `hypothesis id ${r.hid} opened in ${r.n} loops (${r.loops}) — prefer globally unique ids going forward`,
     }));
   },
+  // orphan-pr-lifecycle: a review_round/merged whose pr was never opened in the
+  // log. The pr_opened row is where a PR's loop/issue linkage lives, so later
+  // events against an unopened pr are evidence the recording pipeline silently
+  // lost its writer (e.g. a hook was replaced). Matched globally by pr number,
+  // not per loop: importers derive their own loop_id, and a loop-scoped match
+  // would flag every cross-producer pair. Same time-order + data.backfill
+  // rules as orphan-lifecycle.
+  function orphanPrLifecycle(db) {
+    const rows = db
+      .prepare(
+        `SELECT e.pr, MIN(e.id) AS id, GROUP_CONCAT(DISTINCT e.kind) AS kinds
+         FROM events e
+         WHERE e.kind IN ('review_round','merged') AND e.pr IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM events o
+             WHERE o.kind = 'pr_opened' AND o.pr = e.pr
+               AND (o.ts < e.ts OR (o.ts = e.ts AND o.id < e.id)
+                    OR json_extract(o.data,'$.backfill'))
+           )
+         GROUP BY e.pr ORDER BY e.pr`,
+      )
+      .all() as unknown as { pr: number; id: number; kinds: string }[];
+    return rows.map((r) => ({
+      check: 'orphan-pr-lifecycle',
+      severity: 'warn' as const,
+      message:
+        `pr #${r.pr} has ${r.kinds} but no prior pr_opened — the pr_opened writer may have been ` +
+        `disconnected; backfill: fukuro log-event pr_opened --pr ${r.pr} --loop <loop> --at <when it was opened> (auto-marks data.backfill)`,
+    }));
+  },
   // ontology-*: every reference in the log must resolve in $FUKURO_ONTOLOGY
   // (skipped when unset). Distinct references only, deduped by message, so an
   // unknown loop warns once however many events carry it — this is the

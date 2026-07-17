@@ -458,6 +458,32 @@ test('lint: same hypothesis id across loops is info only and exit 0', () => {
   assert.equal(json.findings[0]?.check, 'ambiguous-hypothesis-id');
 });
 
+test('lint: review_round/merged without a prior pr_opened warns, one finding per pr', () => {
+  const cli = makeCli();
+  // pr 7: opened first — clean. pr 8: two later events against an unopened pr.
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '7');
+  cli.run('log-event', 'review_round', '--loop', 'L', '--pr', '7');
+  cli.run('log-event', 'review_round', '--loop', 'L', '--pr', '8');
+  cli.run('log-event', 'merged', '--loop', 'L', '--pr', '8');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 1);
+  const orphans = res.stdout.match(/warn \[orphan-pr-lifecycle\]/g) ?? [];
+  assert.equal(orphans.length, 1, 'grouped by pr, not one finding per event');
+  // GROUP_CONCAT(DISTINCT) does not guarantee order — assert both kinds, not the join order
+  assert.match(res.stdout, /pr #8 has \S*review_round\S* but no prior pr_opened/);
+  assert.match(res.stdout, /pr #8 has \S*merged\S* but no prior pr_opened/);
+  assert.ok(res.stdout.includes('backfill: fukuro log-event pr_opened --pr 8'));
+});
+
+test('lint: a backfilled pr_opened satisfies earlier pr events', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'merged', '--loop', 'L', '--pr', '9');
+  cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '9', '--at', '2000-01-01T00:00:00Z');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('lint: no findings'));
+});
+
 test('lint: lifecycle order is event time, not row id — a backfilled opened with historical ts resolves', () => {
   const cli = makeCli();
   const db = new DatabaseSync(cli.dbFile);
