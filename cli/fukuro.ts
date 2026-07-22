@@ -379,6 +379,20 @@ function logEvent(kind: string | undefined, values: CliValues): void {
       console.error(`--data is not valid JSON: ${values.data}`);
       process.exit(1);
     }
+    // Payload keys never populate the first-class columns; a writer who puts
+    // pr/issue/loop inside --data believes they attributed, but aggregation
+    // sees null. Warn instead of reject: the payload may legitimately quote
+    // another event's fields, and the write is still coherent.
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const shadowed = ['pr', 'issue', 'loop'].filter((key) =>
+        Object.prototype.hasOwnProperty.call(parsed, key),
+      );
+      if (shadowed.length > 0) {
+        console.warn(
+          `warning: --data key(s) ${shadowed.join('/')} do not populate the first-class column(s) — use --pr/--issue/--loop flags (--pr none to acknowledge no PR)`,
+        );
+      }
+    }
   }
   // Sugar flags merge into the payload (and win on key conflicts) so that
   // quote-fragile hand-written JSON is never required for the common unit fields.

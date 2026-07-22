@@ -390,6 +390,28 @@ test('hoot: --pr none is accepted, recorded, and acknowledged by report', () => 
   assert.ok(!cli.run('report').includes('warn:'));
 });
 
+test('shadowed payload keys warn but the write is accepted', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  const shadowed = spawnCli(
+    cli,
+    'log-event',
+    'tick',
+    '--loop',
+    'L',
+    '--data',
+    '{"pr":"none","note":"x"}',
+  );
+  assert.equal(shadowed.status, 0, 'a shadowed key warns, it does not refuse');
+  assert.ok(shadowed.stderr.includes('warning:') && shadowed.stderr.includes('pr'));
+  const row = cli.db().prepare("SELECT pr FROM events WHERE kind='tick'").get() as {
+    pr: number | null;
+  };
+  assert.equal(row.pr, null, 'payload keys never populate the column');
+  const clean = spawnCli(cli, 'log-event', 'tick', '--loop', 'L', '--data', '{"note":"y"}');
+  assert.ok(!clean.stderr.includes('warning:'), 'no shadowed keys, no warning');
+});
+
 test('hoot: above the candidate cap it degrades to a warning; zero candidates stay silent', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'L');
