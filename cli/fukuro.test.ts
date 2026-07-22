@@ -703,6 +703,46 @@ test('events --loop filters to one loop', () => {
   assert.ok(rows.length === 2 && rows.every((row) => row.loop_id === 'A'));
 });
 
+test('events --pr/--issue/--kind filter and default to unbounded (#40)', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'A', '--issue', '9');
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--pr', '5');
+  cli.run('log-event', 'tick', '--loop', 'A', '--pr', '5');
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--pr', '6');
+
+  const byPr = JSON.parse(cli.run('events', '--pr', '5', '--json')) as { pr: number }[];
+  assert.ok(byPr.length === 2 && byPr.every((r) => r.pr === 5));
+
+  const byIssue = JSON.parse(cli.run('events', '--issue', '9', '--json')) as { issue: number }[];
+  assert.ok(byIssue.length === 1 && byIssue[0].issue === 9);
+
+  const byKind = JSON.parse(cli.run('events', '--kind', 'tick', '--json')) as { kind: string }[];
+  assert.ok(byKind.length === 1 && byKind[0].kind === 'tick');
+
+  // combined filters AND together
+  const combined = JSON.parse(
+    cli.run('events', '--pr', '5', '--kind', 'tick', '--json'),
+  ) as { pr: number; kind: string }[];
+  assert.deepEqual(combined.map((r) => [r.pr, r.kind]), [[5, 'tick']]);
+});
+
+test('events truncation is explicit, not silent (#40)', () => {
+  const cli = makeCli();
+  for (let i = 0; i < 25; i++) cli.run('log-event', 'tick', '--loop', 'A', '--pr', '5');
+
+  // unscoped default (--limit defaults to 20): stderr says so.
+  const unscoped = spawnCli(cli, 'events');
+  assert.match(unscoped.stderr, /showing last 20 of 25 events/);
+
+  // scoped by --pr with no explicit --limit: unbounded, no truncation notice.
+  const scoped = JSON.parse(cli.run('events', '--pr', '5', '--json')) as unknown[];
+  assert.equal(scoped.length, 25);
+
+  // scoped AND an explicit --limit: caller's limit wins, and is disclosed.
+  const scopedLimited = spawnCli(cli, 'events', '--pr', '5', '--limit', '10');
+  assert.match(scopedLimited.stderr, /showing last 10 of 25 events/);
+});
+
 /** Synthetic entity directory: loop/, hypothesis/, stop-line/ with one .md per entity. */
 const makeOntology = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'fukuro-ont-'));

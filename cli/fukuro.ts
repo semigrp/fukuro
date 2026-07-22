@@ -37,8 +37,13 @@ Usage:
                                            position is recomputed from git + the event log)
   fukuro log-event <kind> [options]        Append one event (missing --loop/--issue/--pr
                                            are filled from the derived context)
-  fukuro events [--limit N] [--loop <id>] [--profile private|public] [--json]
-                                           Show recent events
+  fukuro events [--limit N] [--loop <id>] [--pr N] [--issue N] [--kind <k>]
+                [--profile private|public] [--json]
+                                           Show recent events. --pr/--issue/--kind
+                                           filter to that scope, unbounded by --limit
+                                           (pass --limit too to also cap the result).
+                                           A truncated result says so explicitly, so
+                                           "not shown" is never mistaken for "absent"
   fukuro report [--days N] [--loop <id>] [--profile private|public]
                 [--format text|json|md] [--out <path>]
                                            KPI summary (+ open hypotheses, stop-line breakdown)
@@ -93,6 +98,7 @@ interface CliValues {
   loop?: string;
   issue?: string;
   pr?: string;
+  kind?: string;
   session?: string;
   data?: string;
   id?: string;
@@ -145,6 +151,7 @@ function main(): void {
       loop: { type: 'string' },
       issue: { type: 'string' },
       pr: { type: 'string' },
+      kind: { type: 'string' },
       session: { type: 'string' },
       data: { type: 'string' },
       id: { type: 'string' },
@@ -574,18 +581,50 @@ function showCtx(values: CliValues): void {
   }
 }
 
+/**
+ * --pr/--issue/--kind (#40) are point-lookup filters ("does this event exist
+ * for PR N?"), not a browsing aid like --loop — an absence claim is only as
+ * good as the window it was checked against, so a scoped query defaults to
+ * unbounded rather than silently inheriting the 20-row browsing default.
+ * --limit still applies when the caller passes it explicitly (detected via
+ * argv, since parseArgs cannot distinguish "default" from "typed --limit 20").
+ */
 function listEvents(values: CliValues): void {
   const db = openDb();
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+  if (values.loop !== undefined) {
+    conditions.push('loop_id = ?');
+    params.push(values.loop);
+  }
+  if (values.pr !== undefined) {
+    conditions.push('pr = ?');
+    params.push(toInt('pr', values.pr) ?? -1);
+  }
+  if (values.issue !== undefined) {
+    conditions.push('issue = ?');
+    params.push(toInt('issue', values.issue) ?? -1);
+  }
+  if (values.kind !== undefined) {
+    conditions.push('kind = ?');
+    params.push(values.kind);
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limitExplicit = process.argv.includes('--limit');
+  const scoped = values.pr !== undefined || values.issue !== undefined || values.kind !== undefined;
+  const limit = limitExplicit || !scoped ? (toInt('limit', values.limit) ?? 20) : null;
+  const total = (
+    db.prepare(`SELECT COUNT(*) AS n FROM events ${where}`).get(...params) as { n: number }
+  ).n;
   const rows = (
-    values.loop !== undefined
-      ? db
-          .prepare('SELECT * FROM events WHERE loop_id = ? ORDER BY id DESC LIMIT ?')
-          .all(values.loop, toInt('limit', values.limit) ?? 20)
-      : db
-          .prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?')
-          .all(toInt('limit', values.limit) ?? 20)
+    limit === null
+      ? db.prepare(`SELECT * FROM events ${where} ORDER BY id DESC`).all(...params)
+      : db.prepare(`SELECT * FROM events ${where} ORDER BY id DESC LIMIT ?`).all(...params, limit)
   ) as unknown as EventRow[];
   db.close();
+  if (limit !== null && total > rows.length) {
+    console.error(`showing last ${rows.length} of ${total} events`);
+  }
   // public profile: timestamps and kinds only — no identifiers, no payloads
   if (values.profile === 'public') {
     const redacted = rows.map((r) => ({ ts: r.ts, kind: r.kind }));
