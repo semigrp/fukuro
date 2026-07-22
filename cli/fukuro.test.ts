@@ -551,6 +551,18 @@ test('finding after loop_start auto-attributes to the single open loop', () => {
   assert.equal(row.loop_id, 'L');
 });
 
+test('decision_made is a canonical kind and logs cleanly', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  const ok = spawnCli(cli, 'log-event', 'decision_made', '--loop', 'L', '--data', '{"decision":"x","owner":"human"}');
+  assert.equal(ok.status, 0);
+  assert.ok(!ok.stderr.includes('not a canonical kind'));
+  const row = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='decision_made' AND loop_id='L'").get() as {
+    n: number;
+  };
+  assert.equal(row.n, 1);
+});
+
 test('lint: a clean lifecycle yields no findings and exit 0', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'L');

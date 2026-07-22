@@ -27,6 +27,8 @@ const CANONICAL_KINDS = new Set([
   'hypothesis_refuted',
   'procedure_defined',
   'finding',
+  // Decision unit (ADR 0009).
+  'decision_made',
 ]);
 
 const HELP = `fukuro — telemetry for agentic loops (db: ${dbPath()})

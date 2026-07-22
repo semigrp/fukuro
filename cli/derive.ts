@@ -115,7 +115,7 @@ export function suggestedKinds(context: DerivedContext): string[] {
     return ['tick', 'pr_opened', 'stop_line_hit', 'human_intervention'];
   }
   if (context.loop !== null) {
-    return ['tick', 'finding', 'hypothesis_opened', 'concept_captured', 'procedure_defined', 'loop_end'];
+    return ['tick', 'finding', 'decision_made', 'hypothesis_opened', 'concept_captured', 'procedure_defined', 'loop_end'];
   }
   return ['loop_start', 'hypothesis_opened', 'concept_captured'];
 }
