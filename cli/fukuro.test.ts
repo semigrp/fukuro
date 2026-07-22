@@ -819,6 +819,33 @@ test('ontology: unknown references warn once per distinct ref, with a suggested 
   assert.ok(!off.stdout.includes('ontology'));
 });
 
+test('ontology: adapter-owned loop ids (source:id) are exempt from ontology-loop (#42)', () => {
+  const cli = makeCli();
+  const ont = { FUKURO_ONTOLOGY: makeOntology() };
+  cli.run('log-event', 'loop_start', '--loop', 'claude-code:11111111-1111-1111-1111-111111111111');
+  cli.run('log-event', 'loop_start', '--loop', 'ghost'); // hand-named, still expected to warn
+  const res = spawnCliEnv(cli, ont, 'lint');
+  assert.equal(res.status, 1);
+  assert.equal(
+    (res.stdout.match(/warn \[ontology-loop\]/g) ?? []).length,
+    1,
+    'only the hand-named loop warns',
+  );
+  assert.ok(res.stdout.includes('create loop/ghost.md'));
+  assert.ok(!res.stdout.includes('claude-code:'));
+
+  // same exemption applies at write time (log-event), not just batch lint
+  const written = spawnCliEnv(
+    cli,
+    ont,
+    'log-event',
+    'tick',
+    '--loop',
+    'claude-code:11111111-1111-1111-1111-111111111111',
+  );
+  assert.ok(!written.stderr.includes('ontology'));
+});
+
 test('ontology: log-event accepts the write and warns on stderr (accept-then-warn)', () => {
   const cli = makeCli();
   const ont = { FUKURO_ONTOLOGY: makeOntology() };

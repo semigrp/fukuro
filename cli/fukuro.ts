@@ -787,6 +787,10 @@ function loadOntology(): Ontology | null {
   };
 }
 
+// `<source>:<id>` is the documented shape import (#39) derives loop ids in —
+// a colon reliably marks a loop as adapter-owned rather than hand-named.
+const isAdapterOwnedLoop = (loop: string): boolean => loop.includes(':');
+
 const HYPOTHESIS_KINDS = ['hypothesis_opened', 'hypothesis_confirmed', 'hypothesis_refuted'];
 const slugify = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unnamed';
@@ -808,7 +812,11 @@ function referenceFindings(
   const findings: LintFinding[] = [];
   const warn = (check: string, message: string): number =>
     findings.push({ check, severity: 'warn', message });
-  if (loop !== null && !ont.loops.has(loop)) {
+  // Adapter-owned loop ids (`<source>:<subject.id>`, e.g. `claude-code:<uuid>`)
+  // are machine-generated in bulk by `import` (#39) — one per harness session.
+  // Demanding a hand-written entity per session loop makes the check permanent
+  // noise instead of a signal, so these are exempt from ontology-loop by default.
+  if (loop !== null && !isAdapterOwnedLoop(loop) && !ont.loops.has(loop)) {
     warn('ontology-loop', `loop "${loop}" has no entity — create loop/${loop}.md in $FUKURO_ONTOLOGY`);
   }
   const id = HYPOTHESIS_KINDS.includes(kind) && typeof data?.id === 'string' ? data.id : null;
