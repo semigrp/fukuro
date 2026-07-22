@@ -458,6 +458,17 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     }
     data = JSON.stringify(payload);
   }
+  // Write-time identity guard (#46): downstream derivation cannot mint an entity id, so refuse before the row exists.
+  if (kind === 'concept_captured' || kind === 'procedure_defined') {
+    const payload = data !== null ? (JSON.parse(data) as Record<string, unknown>) : {};
+    const validId = typeof payload.id === 'number' || (typeof payload.id === 'string' && payload.id.length > 0);
+    if (!validId) {
+      console.error(
+        `hoot: ${kind} requires a stable id — pass --id <slug> (downstream derivation cannot create an entity without it). Refused.`,
+      );
+      process.exit(2);
+    }
+  }
   const db = openDb();
 
   // Missing fields are filled from the derived context (explicit flags always win),
@@ -490,6 +501,14 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     derived?.issue != null &&
     explicitIssue !== derived.issue;
   const loop = values.loop ?? derived?.loop ?? null;
+  // Write-time identity guard (#46): a finding with no derivable loop cannot be attributed later.
+  if (kind === 'finding' && loop === null) {
+    db.close();
+    console.error(
+      'hoot: finding requires a loop — pass --loop <id> (nothing derivable from context). Refused.',
+    );
+    process.exit(2);
+  }
   // An explicit --pr names a specific unit; its issue must come from that
   // unit's own pr_opened row, never from the branch-derived issue (a former
   // guard here only compared against a *known* derived pr — when the

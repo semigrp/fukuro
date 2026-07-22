@@ -495,6 +495,62 @@ test('hoot: above the candidate cap it degrades to a warning; zero candidates st
   assert.ok(!silent.stderr.includes('hoot'), 'nothing derivable, nothing to ask');
 });
 
+test('hoot: concept_captured without --id is refused and does not write a row', () => {
+  const cli = makeCli();
+  cli.run('init');
+  const refused = spawnCli(cli, 'log-event', 'concept_captured', '--loop', 'L');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('--id'));
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='concept_captured'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 0);
+});
+
+test('hoot: procedure_defined without --id is refused and does not write a row', () => {
+  const cli = makeCli();
+  cli.run('init');
+  const refused = spawnCli(cli, 'log-event', 'procedure_defined', '--loop', 'L');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('--id'));
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='procedure_defined'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 0);
+});
+
+test('concept_captured with --id succeeds', () => {
+  const cli = makeCli();
+  const ok = spawnCli(cli, 'log-event', 'concept_captured', '--loop', 'L', '--id', 'C-1');
+  assert.equal(ok.status, 0);
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='concept_captured'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 1);
+});
+
+test('hoot: finding without a derivable loop is refused and does not write a row', () => {
+  const cli = makeCli();
+  const refused = spawnCli(cli, 'log-event', 'finding');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('--loop'));
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='finding'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 0);
+});
+
+test('finding after loop_start auto-attributes to the single open loop', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
+  const ok = spawnCli(cli, 'log-event', 'finding');
+  assert.equal(ok.status, 0);
+  const row = cli.db().prepare("SELECT loop_id FROM events WHERE kind='finding'").get() as {
+    loop_id: string | null;
+  };
+  assert.equal(row.loop_id, 'L');
+});
+
 test('lint: a clean lifecycle yields no findings and exit 0', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'L');
