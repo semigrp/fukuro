@@ -219,7 +219,24 @@ test('lint: mismatched-pr-issue flags events whose issue disagrees with that pr\
   const res = spawnCli(cli, 'lint');
   assert.equal(res.status, 1);
   assert.match(res.stdout, /warn \[mismatched-pr-issue\]/);
-  assert.match(res.stdout, /pr #603: 1 event\(s\) recorded issue=#615, but pr_opened recorded issue=#601/);
+  assert.match(
+    res.stdout,
+    /pr #603 \(loop A\): 1 event\(s\) recorded issue=#615, but pr_opened recorded issue=#601/,
+  );
+});
+
+test('lint: mismatched-pr-issue is scoped by loop — two loops legitimately reusing a pr number do not false-positive', () => {
+  const cli = makeCli();
+  // pr numbers are not unique across projects sharing one fukuro.db (same
+  // concern resolveIssueForPr documents) — loop A's pr 5 and loop B's pr 5
+  // are different units with different issues, and neither is a mistake.
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '10', '--pr', '5');
+  cli.run('log-event', 'tick', '--loop', 'A', '--issue', '10', '--pr', '5');
+  cli.run('log-event', 'pr_opened', '--loop', 'B', '--issue', '20', '--pr', '5');
+  cli.run('log-event', 'tick', '--loop', 'B', '--issue', '20', '--pr', '5');
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 0);
+  assert.ok(!res.stdout.includes('mismatched-pr-issue'));
 });
 
 /** Seeds a merged-PR lifecycle with controlled timestamps for KPI assertions. */

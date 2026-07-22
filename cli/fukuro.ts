@@ -489,15 +489,13 @@ function logEvent(kind: string | undefined, values: CliValues): void {
     explicitIssue !== null &&
     derived?.issue != null &&
     explicitIssue !== derived.issue;
-  const foreignPr =
-    explicitPr !== null && derived?.pr != null && explicitPr !== derived.pr;
   const loop = values.loop ?? derived?.loop ?? null;
   // An explicit --pr names a specific unit; its issue must come from that
-  // unit's own pr_opened row, never from the branch-derived issue. The
-  // foreignPr guard above only catches a *mismatch* — when the branch's
-  // derived issue has no pr_opened of its own yet, derived.pr is null, the
-  // guard can't compare, and the branch-derived issue leaked onto an
-  // unrelated PR (#48: 12/13 PRs mis-attributed in one stacked-PR loop).
+  // unit's own pr_opened row, never from the branch-derived issue (a former
+  // guard here only compared against a *known* derived pr — when the
+  // branch's own issue had no pr_opened yet, there was nothing to compare
+  // against, and the branch-derived issue leaked onto an unrelated PR;
+  // #48: 12/13 PRs mis-attributed in one stacked-PR loop).
   const issue =
     explicitIssue ??
     (explicitPr !== null
@@ -1002,27 +1000,43 @@ const LINT_CHECKS: LintCheck[] = [
   // that branch's issue whenever the branch's own issue had no pr_opened yet
   // (the foreign-pr guard only compares against a *known* derived pr, so a
   // null derived pr slipped through). This surfaces pollution already in the
-  // log; the derive fix (resolveIssueForPr) stops new pollution.
+  // log; the derive fix (resolveIssueForPr) stops new pollution. Scoped by
+  // (loop_id, pr) — like resolveIssueForPr itself — since pr numbers are not
+  // unique across projects sharing one fukuro.db; a loop-less join on pr
+  // alone would false-positive whenever two loops legitimately reuse a pr
+  // number with different issues.
   function mismatchedPrIssue(db) {
     const rows = db
       .prepare(
-        `SELECT e.pr AS pr, e.issue AS wrong_issue, first.issue AS opened_issue, COUNT(*) AS n
+        `SELECT e.pr AS pr, e.loop_id AS loop_id, e.issue AS wrong_issue,
+                first.issue AS opened_issue, COUNT(*) AS n
          FROM events e
          JOIN (
-           SELECT pr, issue, MIN(id) AS id FROM events
-           WHERE kind = 'pr_opened' AND pr IS NOT NULL GROUP BY pr
-         ) first ON first.pr = e.pr
+           SELECT o.pr, o.loop_id, o.issue FROM events o
+           WHERE o.kind = 'pr_opened' AND o.pr IS NOT NULL
+             AND o.id = (
+               SELECT MIN(id) FROM events i
+               WHERE i.kind = 'pr_opened' AND i.pr IS o.pr AND i.loop_id IS o.loop_id
+             )
+         ) first ON first.pr IS e.pr AND first.loop_id IS e.loop_id
          WHERE e.issue IS NOT NULL AND first.issue IS NOT NULL
            AND e.issue != first.issue AND e.kind != 'pr_opened'
-         GROUP BY e.pr, e.issue ORDER BY e.pr`,
+         GROUP BY e.pr, e.loop_id, e.issue ORDER BY e.pr`,
       )
-      .all() as unknown as { pr: number; wrong_issue: number; opened_issue: number; n: number }[];
+      .all() as unknown as {
+      pr: number;
+      loop_id: string | null;
+      wrong_issue: number;
+      opened_issue: number;
+      n: number;
+    }[];
     return rows.map((r) => ({
       check: 'mismatched-pr-issue',
       severity: 'warn' as const,
       message:
-        `pr #${r.pr}: ${r.n} event(s) recorded issue=#${r.wrong_issue}, but pr_opened recorded issue=#${r.opened_issue} — ` +
-        `likely branch-derived leakage; re-record with --issue ${r.opened_issue} --at <original time> --data '{"supersedes":"<event id>"}'`,
+        `pr #${r.pr}${r.loop_id === null ? '' : ` (loop ${r.loop_id})`}: ${r.n} event(s) recorded issue=#${r.wrong_issue}, ` +
+        `but pr_opened recorded issue=#${r.opened_issue} — likely branch-derived leakage; ` +
+        `re-record with --issue ${r.opened_issue} --at <original time> --data '{"supersedes":"<event id>"}'`,
     }));
   },
   // ontology-*: every reference in the log must resolve in $FUKURO_ONTOLOGY
