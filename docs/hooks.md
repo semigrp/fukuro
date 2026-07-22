@@ -98,6 +98,63 @@ Merges are best captured by the loop itself (the tick that observes `state: MERG
 - run: fukuro log-event merged --pr "${{ github.event.pull_request.number }}"
 ```
 
+## Async merge sync: when nobody was there to see it merge
+
+The recipes above fire while a session or CI run is active. A bot that merges on its own schedule
+(auto-merge after review, a scheduled release train) closes PRs with nobody watching, so the `pr`
+ledger obligation (`pr_opened` with no `merged`) goes stale — not because instrumentation is
+broken, but because there was no live process to log it at the moment it happened.
+
+This is still a recipe, not a shipped integration: the script below is something you run from your
+own cron/launchd, reading the ledger and writing through `fukuro import` (#39) — fukuro has no
+opinion on how or when you invoke it, and ships no daemon of its own.
+
+```sh
+#!/bin/sh
+# gh-merge-sync.sh — closes stale 'pr' ledger entries for PRs merged by a bot while no
+# session was open to log them. Idempotent: sourceEventId keys on the merge commit, so
+# re-running (e.g. hourly from cron) never double-imports. Usage: REPO=owner/name ./gh-merge-sync.sh
+set -eu
+: "${REPO:?set REPO=owner/name}"
+
+fukuro report --format json \
+  | jq -r '.open_ledger[] | select(.pair == "pr") | .scope' \
+  | while read -r pr; do
+      json=$(gh pr view "$pr" --repo "$REPO" \
+        --json state,mergedAt,mergeCommit,closingIssuesReferences 2>/dev/null) || continue
+      printf '%s' "$json" | jq -c --arg pr "$pr" --arg repo "$REPO" '
+        select(.state == "MERGED" and .mergeCommit != null) |
+        (.mergeCommit.oid) as $oid | (.mergedAt) as $at |
+        ([{schema:"fukuro.telemetry-event/v1", source:"github",
+           sourceEventId:("merge:"+$repo+":"+$pr+":"+$oid), occurredAt:$at, kind:"merged",
+           subject:{system:"github",type:"pull_request",id:($repo+"#"+$pr),version:$oid},
+           refs:[{system:"github",type:"pull_request",id:($repo+"#"+$pr),version:$oid}],
+           data:{}}]
+         + [.closingIssuesReferences[]? |
+            {schema:"fukuro.telemetry-event/v1", source:"github",
+             sourceEventId:("close:"+$repo+":"+(.number|tostring)+":"+$oid),
+             occurredAt:$at, kind:"issue_closed",
+             subject:{system:"github",type:"issue",id:($repo+"#"+(.number|tostring)),version:$oid},
+             refs:[{system:"github",type:"issue",id:($repo+"#"+(.number|tostring)),version:$oid}],
+             data:{}}]
+        )[]'
+    done \
+  | fukuro import
+```
+
+Each candidate comes from the ledger itself (`pair == "pr"`, i.e. `pr_opened` with no `merged`
+yet), not from guessing a PR range, so the script only ever asks about obligations fukuro already
+believes are open. A PR that is still open, or closed without merging, produces no event — this
+recipe only ever fills in the one fact a live session couldn't have caught: that the merge already
+happened. `loop_end` is deliberately not synced here: whether a loop's *goal* is done is a
+judgment call for whoever owns the loop, not something a merge event can decide on its own.
+
+The `.mergeCommit != null` guard matters: with `set -e`, letting jq bind a null `oid` into the
+`sourceEventId` string would raise a type error and abort the whole run mid-loop, silently
+dropping every PR after the one that tripped it. A merge whose commit info isn't (yet) available
+from the API is skipped this run and picked up on the next one instead of taking the script down
+with it.
+
 ## Codex: shadow routing observation
 
 [ADR 0008](adr/0008-measure-native-skill-routing-before-introducing-a-gate.md) permits automatic
