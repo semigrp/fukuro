@@ -344,6 +344,28 @@ function normalizeAt(input: string): string | null {
   return new Date(ms).toISOString();
 }
 
+/**
+ * The issue attached to a specific PR, per that PR's own pr_opened row —
+ * never guessed from the branch currently checked out. Scoped to loop_id
+ * (like the hoot candidate check) since pr numbers are not unique across
+ * projects sharing one fukuro.db. Returns null rather than guessing when
+ * no pr_opened row exists yet for this pr.
+ */
+function resolveIssueForPr(
+  db: ReturnType<typeof openDb>,
+  loop: string | null,
+  pr: number,
+): number | null {
+  const row = db
+    .prepare(
+      `SELECT issue FROM events
+       WHERE kind = 'pr_opened' AND pr = ? AND loop_id IS ?
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(pr, loop) as { issue: number | null } | undefined;
+  return row?.issue ?? null;
+}
+
 function logEvent(kind: string | undefined, values: CliValues): void {
   if (!kind) {
     console.error('log-event requires a <kind> argument');
@@ -470,9 +492,19 @@ function logEvent(kind: string | undefined, values: CliValues): void {
   const foreignPr =
     explicitPr !== null && derived?.pr != null && explicitPr !== derived.pr;
   const loop = values.loop ?? derived?.loop ?? null;
+  // An explicit --pr names a specific unit; its issue must come from that
+  // unit's own pr_opened row, never from the branch-derived issue. The
+  // foreignPr guard above only catches a *mismatch* — when the branch's
+  // derived issue has no pr_opened of its own yet, derived.pr is null, the
+  // guard can't compare, and the branch-derived issue leaked onto an
+  // unrelated PR (#48: 12/13 PRs mis-attributed in one stacked-PR loop).
   const issue =
     explicitIssue ??
-    (foreignLoop || foreignPr ? null : (derived?.issue ?? null));
+    (explicitPr !== null
+      ? resolveIssueForPr(db, loop, explicitPr)
+      : foreignLoop
+        ? null
+        : (derived?.issue ?? null));
   const pr = prNone
     ? null
     : (explicitPr ??
@@ -962,6 +994,35 @@ const LINT_CHECKS: LintCheck[] = [
       message:
         `pr #${r.pr} has ${r.kinds} but no prior pr_opened — the pr_opened writer may have been ` +
         `disconnected; backfill: fukuro log-event pr_opened --pr ${r.pr} --loop <loop> --at <when it was opened> (auto-marks data.backfill)`,
+    }));
+  },
+  // mismatched-pr-issue: an event's issue disagrees with the issue that pr's
+  // own pr_opened row recorded (#48). Before the derive fix, a writer sitting
+  // on an unrelated branch while logging an explicit --pr could still inherit
+  // that branch's issue whenever the branch's own issue had no pr_opened yet
+  // (the foreign-pr guard only compares against a *known* derived pr, so a
+  // null derived pr slipped through). This surfaces pollution already in the
+  // log; the derive fix (resolveIssueForPr) stops new pollution.
+  function mismatchedPrIssue(db) {
+    const rows = db
+      .prepare(
+        `SELECT e.pr AS pr, e.issue AS wrong_issue, first.issue AS opened_issue, COUNT(*) AS n
+         FROM events e
+         JOIN (
+           SELECT pr, issue, MIN(id) AS id FROM events
+           WHERE kind = 'pr_opened' AND pr IS NOT NULL GROUP BY pr
+         ) first ON first.pr = e.pr
+         WHERE e.issue IS NOT NULL AND first.issue IS NOT NULL
+           AND e.issue != first.issue AND e.kind != 'pr_opened'
+         GROUP BY e.pr, e.issue ORDER BY e.pr`,
+      )
+      .all() as unknown as { pr: number; wrong_issue: number; opened_issue: number; n: number }[];
+    return rows.map((r) => ({
+      check: 'mismatched-pr-issue',
+      severity: 'warn' as const,
+      message:
+        `pr #${r.pr}: ${r.n} event(s) recorded issue=#${r.wrong_issue}, but pr_opened recorded issue=#${r.opened_issue} — ` +
+        `likely branch-derived leakage; re-record with --issue ${r.opened_issue} --at <original time> --data '{"supersedes":"<event id>"}'`,
     }));
   },
   // ontology-*: every reference in the log must resolve in $FUKURO_ONTOLOGY

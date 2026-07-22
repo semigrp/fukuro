@@ -173,6 +173,55 @@ test('an explicit foreign --issue blocks branch-derived pr autofill (and vice ve
   assert.deepEqual({ ...round }, { loop_id: 'A', issue: null, pr: 11 });
 });
 
+test('an explicit --pr resolves issue from that pr\'s own pr_opened, not the checked-out branch (#48)', () => {
+  const cli = makeCli();
+  const git = (args: string) =>
+    execSync(`git -c user.email=t@example.com -c user.name=t ${args}`, {
+      cwd: cli.dir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  git('init -q');
+  git('commit --allow-empty -q -m init');
+  // checked out on issue 615's branch, but issue 615 has no pr_opened of its
+  // own yet — this is exactly the gap the old foreign-pr guard missed, since
+  // it only fires when a *known* derived pr disagrees with the explicit one
+  git('checkout -q -b 615-feature');
+  cli.run('log-event', 'loop_start', '--loop', 'A');
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '601', '--pr', '603');
+
+  cli.run('log-event', 'tick', '--loop', 'A', '--pr', '603');
+  const row = cli
+    .db()
+    .prepare("SELECT issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
+    .get() as { issue: number | null; pr: number | null };
+  assert.deepEqual({ ...row }, { issue: 601, pr: 603 }, 'must not inherit branch issue 615');
+
+  // a pr with no pr_opened at all still resolves to null, not a guess
+  cli.run('log-event', 'tick', '--loop', 'A', '--pr', '999');
+  const unknown = cli
+    .db()
+    .prepare("SELECT issue, pr FROM events WHERE kind = 'tick' ORDER BY id DESC LIMIT 1")
+    .get() as { issue: number | null; pr: number | null };
+  assert.deepEqual({ ...unknown }, { issue: null, pr: 999 });
+});
+
+test('lint: mismatched-pr-issue flags events whose issue disagrees with that pr\'s pr_opened (#48)', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '601', '--pr', '603');
+  // simulates the pre-fix leakage: a tick recorded against pr 603 with the
+  // wrong (branch-derived) issue attached
+  const db = new DatabaseSync(cli.dbFile);
+  const insert = db.prepare(
+    'INSERT INTO events (loop_id, issue, pr, kind) VALUES (?, ?, ?, ?)',
+  );
+  insert.run('A', 615, 603, 'tick');
+  db.close();
+  const res = spawnCli(cli, 'lint');
+  assert.equal(res.status, 1);
+  assert.match(res.stdout, /warn \[mismatched-pr-issue\]/);
+  assert.match(res.stdout, /pr #603: 1 event\(s\) recorded issue=#615, but pr_opened recorded issue=#601/);
+});
+
 /** Seeds a merged-PR lifecycle with controlled timestamps for KPI assertions. */
 const seedMergedPr = (dbFile: string): void => {
   const db = new DatabaseSync(dbFile);
