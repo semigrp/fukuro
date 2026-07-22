@@ -50,7 +50,7 @@ absent `--issue` on a topic loop is coherent, not a gap the report should flag.
 |---|---|
 | loop begins (not before, not re-logged) | `loop_start --issue <id>` (topic loop: omit `--issue`, state the close condition in the note — §1) |
 | one unit of work done inside a tick | `tick --pr <n>` (see §3) |
-| PR created | `pr_opened --issue <n> --pr <n>` |
+| PR created | `pr_opened --issue <n> --pr <n>` (topic loop: omit `--issue`, same as `loop_start` — a topic loop can still produce a PR) |
 | a reviewer produced feedback (each round) | `review_round --pr <n> --data '{"reviewer":"<who>","round":N}'` |
 | PR merged (by whoever holds merge authority) | `merged --issue <n> --pr <n>` |
 | tracker item closed | `issue_closed --issue <n>` |
