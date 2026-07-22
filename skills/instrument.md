@@ -19,8 +19,9 @@ concurrent PRs; the run before these rules existed scored 0%.
 
 ## 1. Name the loop before the first event
 
-One loop = one goal-sized unit of work. Name it `<topic>-<tracker-id>` so it stays greppable and
-stable across sessions. Log the opening event **with tracker attribution**:
+One loop = one goal-sized unit of work, and most loops are tracker-bound: name them
+`<topic>-<tracker-id>` so they stay greppable and stable across sessions, and log the opening
+event **with tracker attribution**:
 
 ```sh
 fukuro log-event loop_start --loop <topic>-<id> --issue <id> --data '{"note":"<goal + entry signal>"}'
@@ -30,11 +31,24 @@ Scar: a run with perfect PR attribution still scored 0% *issue*-scoped coverage 
 because the single opening event carried no `--issue`. Attribution you skip at the boundary
 events is the attribution the report cannot reconstruct.
 
+**Topic loops** (no tracker issue exists — docs housekeeping, meeting prep, exploration) are
+first-class, not a workaround: `--loop` is always required, but `--issue` is only required when a
+tracker item actually exists for this work. Name them `<topic>` (no numeric suffix), and put the
+loop's own close condition in the start note instead of leaning on an issue's state:
+
+```sh
+fukuro log-event loop_start --loop <topic> --data '{"note":"<goal>. Closes when: <condition>"}'
+```
+
+A topic loop still gets `tick`/`review_round`/`loop_end` like any other — what it lacks is
+`--issue`, not lifecycle. Do not invent a placeholder issue number to satisfy the table below; an
+absent `--issue` on a topic loop is coherent, not a gap the report should flag.
+
 ## 2. The event set and when each fires
 
 | moment | event |
 |---|---|
-| loop begins (not before, not re-logged) | `loop_start --issue <id>` |
+| loop begins (not before, not re-logged) | `loop_start --issue <id>` (topic loop: omit `--issue`, state the close condition in the note — §1) |
 | one unit of work done inside a tick | `tick --pr <n>` (see §3) |
 | PR created | `pr_opened --issue <n> --pr <n>` |
 | a reviewer produced feedback (each round) | `review_round --pr <n> --data '{"reviewer":"<who>","round":N}'` |
