@@ -134,6 +134,8 @@ interface MergedPr {
   review_rounds: number;
   lead_hours: number | null;
   ticks: number;
+  scheduled_at: string | null;
+  wait_hours: number | null;
 }
 
 function main(): void {
@@ -1199,10 +1201,31 @@ function report(values: CliValues): void {
         .all() as unknown as { pr: number; n: number }[]
     ).map((row) => [row.pr, row.n]),
   );
-  const mergedPrs: MergedPr[] = mergedPrsBase.map((r) => ({
-    ...r,
-    ticks: ticksByPr.get(r.pr) ?? 0,
-  }));
+  // scheduled_at (#49): earliest (ts, id) wins when an external system (e.g.
+  // an auto-merge bot) logs a schedule more than once for the same PR.
+  const scheduledByPr = new Map<number, string>();
+  for (const row of db
+    .prepare(
+      `SELECT pr, json_extract(data,'$.scheduled_at') AS scheduled_at
+       FROM events
+       WHERE pr IS NOT NULL AND json_extract(data,'$.scheduled_at') IS NOT NULL${loopClause}
+       ORDER BY ts, id`,
+    )
+    .all(...loopParams) as unknown as { pr: number; scheduled_at: string }[]) {
+    if (!scheduledByPr.has(row.pr)) scheduledByPr.set(row.pr, row.scheduled_at);
+  }
+  const mergedPrs: MergedPr[] = mergedPrsBase.map((r) => {
+    const scheduled_at = scheduledByPr.get(r.pr) ?? null;
+    return {
+      ...r,
+      ticks: ticksByPr.get(r.pr) ?? 0,
+      scheduled_at,
+      wait_hours:
+        scheduled_at !== null
+          ? Math.round(((Date.parse(r.merged_ts) - Date.parse(scheduled_at)) / 36e5) * 10) / 10
+          : null,
+    };
+  });
 
   // Attribution coverage over the window. SUM(...) over zero rows is NULL,
   // hence the ratio() null handling.
@@ -1301,6 +1324,19 @@ function report(values: CliValues): void {
       .sort((a, b) => b.lines - a.lines),
   };
 
+  // Merge-wait KPI (#49): scheduled-vs-actual latency for merges scheduled by
+  // an external system. Scoped to this window's merged PRs, like lead time.
+  const scheduledMergedPrs = mergedPrs.filter((r) => r.scheduled_at !== null);
+  const waitHours = scheduledMergedPrs
+    .map((r) => r.wait_hours)
+    .filter((v): v is number => v != null);
+  const mergeWait: MergeWaitStats = {
+    prs_with_schedule: scheduledMergedPrs.length,
+    scheduled_coverage: ratio(scheduledMergedPrs.length, mergedPrs.length),
+    median_wait_hours: median(waitHours),
+    max_wait_hours: waitHours.length > 0 ? Math.max(...waitHours) : null,
+  };
+
   const count = (kind: string): number => byKind.find((r) => r.kind === kind)?.n ?? 0;
   const merges = mergedPrs.length;
   const fullSummary = {
@@ -1328,6 +1364,7 @@ function report(values: CliValues): void {
       improve_applied_signal: ratio(signalCoverage.with_field, signalCoverage.total),
     },
     unit_size: unitSize,
+    merge_wait: mergeWait,
     // The ledger is all-time, like open hypotheses: an obligation opened last
     // month and never discharged is exactly what the report must surface.
     open_ledger: deriveLedger(db),
@@ -1390,6 +1427,15 @@ interface UnitSizeStats {
   oversized: { pr: number; lines: number }[]; // > UNIT_SIZE_CAP
 }
 
+// Merge-wait KPI (#49): scheduled_at is a pure convention on event data, no
+// schema change. wait_hours can be negative (merged ahead of schedule).
+interface MergeWaitStats {
+  prs_with_schedule: number;
+  scheduled_coverage: number | null; // share of window's merged PRs with a known scheduled_at
+  median_wait_hours: number | null;
+  max_wait_hours: number | null;
+}
+
 type ReportSummary = {
   window_days: number;
   loop: string | null;
@@ -1410,6 +1456,7 @@ type ReportSummary = {
     improve_applied_signal: number | null;
   };
   unit_size: UnitSizeStats;
+  merge_wait: MergeWaitStats;
   open_ledger: LedgerEntry[];
   hypotheses: {
     opened_in_window: number;
@@ -1479,6 +1526,19 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
       for (const o of u.oversized) {
         lines.push(`  warn: PR #${o.pr} is ${o.lines} changed lines — over the ${UNIT_SIZE_CAP}-line cap, split the unit`);
       }
+    }
+  }
+  const mw = summary.merge_wait;
+  if (summary.merged_prs > 0) {
+    lines.push('');
+    lines.push('merge wait (scheduled vs. actual):');
+    if (mw.prs_with_schedule === 0) {
+      lines.push(
+        `  no scheduled_at data on this window's ${summary.merged_prs} merged PR(s) — see docs/hooks.md to capture merge schedule`,
+      );
+    } else {
+      lines.push(`  PRs with scheduled_at:     ${mw.prs_with_schedule}/${summary.merged_prs} (${pct(mw.scheduled_coverage)})`);
+      lines.push(`  median / max wait (hours): ${mw.median_wait_hours} / ${mw.max_wait_hours}`);
     }
   }
   if (summary.open_ledger.length > 0) {
@@ -1554,6 +1614,23 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
         lines.push(`> ⚠ PR #${o.pr}: ${o.lines} changed lines — over the ${UNIT_SIZE_CAP}-line cap, split the unit`);
       }
       if (u.oversized.length > 0) lines.push('');
+    }
+  }
+  const mw = summary.merge_wait;
+  if (summary.merged_prs > 0) {
+    lines.push('## Merge wait (scheduled vs. actual)', '');
+    if (mw.prs_with_schedule === 0) {
+      lines.push(
+        `_No scheduled_at data on this window's ${summary.merged_prs} merged PR(s) — see \`docs/hooks.md\` to capture merge schedule._`,
+        '',
+      );
+    } else {
+      lines.push('| metric | value |');
+      lines.push('|---|---|');
+      lines.push(`| PRs with scheduled_at | ${mw.prs_with_schedule}/${summary.merged_prs} (${pct(mw.scheduled_coverage)}) |`);
+      lines.push(`| median wait (hours) | ${mw.median_wait_hours} |`);
+      lines.push(`| max wait (hours) | ${mw.max_wait_hours} |`);
+      lines.push('');
     }
   }
   if (summary.open_ledger.length > 0) {

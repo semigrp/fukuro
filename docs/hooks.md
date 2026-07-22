@@ -98,6 +98,23 @@ Merges are best captured by the loop itself (the tick that observes `state: MERG
 - run: fukuro log-event merged --pr "${{ github.event.pull_request.number }}"
 ```
 
+### Variant: attach scheduled_at (merge-wait KPI)
+
+When a merge is scheduled by an external system (an auto-merge bot's APPROVE comment naming a
+time, a merge-train slot), log it as soon as it's known — `data.scheduled_at` on a `tick` (or any
+PR-scoped event) — and carry the same value onto the eventual `merged` event. `report` then
+surfaces scheduled-vs-actual wait per PR and in aggregate: a direct KPI for merge-train latency,
+and a guard against false-stall escalations (compare *now* against `scheduled_at`, not against
+silence).
+
+```sh
+fukuro log-event tick --pr 42 --data '{"scheduled_at":"2026-07-23T10:30:00Z"}'
+```
+
+If the schedule is scraped from a bot comment (see #41 for a GitHub sync producer), emit it with
+`source: "github"` alongside `scheduled_at`. A human or agent who simply noticed the stated time
+can log it by hand the same way — no producer required.
+
 ## Async merge sync: when nobody was there to see it merge
 
 The recipes above fire while a session or CI run is active. A bot that merges on its own schedule

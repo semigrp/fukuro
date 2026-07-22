@@ -837,6 +837,120 @@ test('report: unit-size without size data collapses to a pointer; empty window o
   assert.ok(!empty.run('report', '--format', 'md').includes('Unit size'));
 });
 
+type MergeWait = {
+  prs_with_schedule: number;
+  scheduled_coverage: number | null;
+  median_wait_hours: number | null;
+  max_wait_hours: number | null;
+};
+
+/** Seeds two merged PRs — one with a known schedule, one without — for the merge-wait KPI (#49). */
+const seedScheduledPrs = (dbFile: string): void => {
+  const db = new DatabaseSync(dbFile);
+  db.exec(schema);
+  const insert = db.prepare('INSERT INTO events (ts, loop_id, pr, kind, data) VALUES (?, ?, ?, ?, ?)');
+  const at = (minutesAgo: number): string => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  // #1: a bot's APPROVE stated a schedule; it merges 1 hour after it (wait_hours = 1)
+  insert.run(at(300), 'L', 1, 'pr_opened', null);
+  insert.run(at(200), 'L', 1, 'tick', JSON.stringify({ scheduled_at: at(180) }));
+  insert.run(at(120), 'L', 1, 'merged', JSON.stringify({ scheduled_at: at(180) }));
+  // #2: merged with no schedule ever recorded — counts against coverage only
+  insert.run(at(100), 'L', 2, 'pr_opened', null);
+  insert.run(at(60), 'L', 2, 'merged', null);
+  db.close();
+};
+
+test('report: merge-wait KPI — coverage, median/max wait, scheduled_at carries onto merged', () => {
+  const cli = makeCli();
+  seedScheduledPrs(cli.dbFile);
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as {
+    merge_wait: MergeWait;
+    prs: { pr: number; scheduled_at: string | null; wait_hours: number | null }[];
+  };
+  assert.equal(summary.merge_wait.prs_with_schedule, 1);
+  assert.equal(summary.merge_wait.scheduled_coverage, 0.5); // 1 of 2 merged PRs
+  assert.equal(summary.merge_wait.median_wait_hours, 1);
+  assert.equal(summary.merge_wait.max_wait_hours, 1);
+  const pr1 = summary.prs.find((p) => p.pr === 1);
+  assert.equal(pr1?.wait_hours, 1);
+  const pr2 = summary.prs.find((p) => p.pr === 2);
+  assert.equal(pr2?.scheduled_at, null);
+  assert.equal(pr2?.wait_hours, null);
+  const text = cli.run('report');
+  assert.ok(text.includes('merge wait (scheduled vs. actual)'));
+  const md = cli.run('report', '--format', 'md');
+  assert.ok(md.includes('## Merge wait'));
+});
+
+test('report: merge-wait public profile keeps aggregates, drops per-PR wait data', () => {
+  const cli = makeCli();
+  seedScheduledPrs(cli.dbFile);
+  const outputs = [
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+    cli.run('report', '--format', 'md', '--profile', 'public'),
+    cli.run('report', '--profile', 'public'),
+  ].join('\n');
+  assert.ok(!/#1\b/.test(outputs), 'PR numbers must be redacted');
+  const summary = JSON.parse(
+    cli.run('report', '--format', 'json', '--profile', 'public'),
+  ) as { merge_wait: MergeWait; prs: unknown[] };
+  assert.deepEqual(summary.merge_wait, {
+    prs_with_schedule: 1,
+    scheduled_coverage: 0.5,
+    median_wait_hours: 1,
+    max_wait_hours: 1,
+  });
+  assert.equal(summary.prs.length, 0);
+});
+
+test('report: merge-wait without any scheduled_at collapses to a pointer; no merged PRs omits the section', () => {
+  const cli = makeCli();
+  seedMergedPr(cli.dbFile); // 1 merged PR, no scheduled_at anywhere
+  const mw = (JSON.parse(cli.run('report', '--format', 'json')) as { merge_wait: MergeWait }).merge_wait;
+  assert.deepEqual(mw, {
+    prs_with_schedule: 0,
+    scheduled_coverage: 0,
+    median_wait_hours: null,
+    max_wait_hours: null,
+  });
+  assert.ok(cli.run('report').includes('no scheduled_at data'));
+
+  const empty = makeCli();
+  empty.run('init');
+  const noMerges = (JSON.parse(empty.run('report', '--format', 'json')) as { merge_wait: MergeWait }).merge_wait;
+  assert.equal(noMerges.prs_with_schedule, 0);
+  assert.equal(noMerges.scheduled_coverage, null);
+  assert.ok(!empty.run('report').includes('merge wait'));
+  assert.ok(!empty.run('report', '--format', 'md').includes('Merge wait'));
+});
+
+test('report: merge-wait resolves repeated scheduled_at by earliest (ts, id), not insertion order', () => {
+  const cli = makeCli();
+  const db = new DatabaseSync(cli.dbFile);
+  db.exec(schema);
+  const insert = db.prepare('INSERT INTO events (ts, loop_id, pr, kind, data) VALUES (?, ?, ?, ?, ?)');
+  const at = (minutesAgo: number): string => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  insert.run(at(300), 'L', 9, 'pr_opened', null);
+  // logged later (higher id) but with an earlier ts — ts orders first, not insertion order
+  insert.run(at(200), 'L', 9, 'tick', JSON.stringify({ scheduled_at: '2026-01-01T09:00:00.000Z' }));
+  insert.run(at(250), 'L', 9, 'tick', JSON.stringify({ scheduled_at: '2020-01-01T08:00:00.000Z' }));
+  insert.run(at(60), 'L', 9, 'merged', JSON.stringify({ scheduled_at: '2026-01-01T09:00:00.000Z' }));
+  // same ts on two rows for a second PR: id (insertion order) breaks the tie
+  const tied = at(200);
+  insert.run(at(300), 'L', 10, 'pr_opened', null);
+  insert.run(tied, 'L', 10, 'tick', JSON.stringify({ scheduled_at: '2020-06-01T00:00:00.000Z' }));
+  insert.run(tied, 'L', 10, 'tick', JSON.stringify({ scheduled_at: '2020-06-02T00:00:00.000Z' }));
+  insert.run(at(60), 'L', 10, 'merged', null);
+  db.close();
+  const summary = JSON.parse(cli.run('report', '--format', 'json')) as {
+    prs: { pr: number; scheduled_at: string | null }[];
+  };
+  const pr9 = summary.prs.find((p) => p.pr === 9);
+  const pr10 = summary.prs.find((p) => p.pr === 10);
+  assert.equal(pr9?.scheduled_at, '2020-01-01T08:00:00.000Z');
+  assert.equal(pr10?.scheduled_at, '2020-06-01T00:00:00.000Z');
+});
+
 test('events --loop filters to one loop', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'A');

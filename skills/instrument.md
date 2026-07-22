@@ -60,6 +60,10 @@ Judgment moments (findings, hypotheses, interventions, stop-line hits) are recor
 typed events the instant they happen; they are the return path's raw material and cannot be
 reconstructed later.
 
+If merge authority is a bot that schedules the merge (a stated auto-merge time, a merge-train
+slot), log `data.scheduled_at` as soon as it's stated and carry it onto the eventual `merged`
+event — `report` turns it into a scheduled-vs-actual wait KPI (see docs/hooks.md).
+
 ## 3. Tick attribution — the write-time contract
 
 - In a loop with open PRs, a bare `tick` will be **refused** while the open-PR candidates are
