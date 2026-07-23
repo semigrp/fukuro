@@ -58,6 +58,12 @@ Usage:
                                            <source>:<subject.id>, and are idempotent on
                                            (source, sourceEventId) — re-imports skip. The
                                            contract lives in contracts/telemetry-event.v1
+  fukuro adopt --from <loop> --into <loop>  Copy selected events from a source loop into a
+                                           target loop as declared amendments; originals are
+                                           never touched. Adopted rows keep their original ts
+                                           and carry data.backfill, adopted_from, adopted_row
+                                           for provenance; idempotent on (target loop,
+                                           adopted_row). loop_start/loop_end are never moved
   fukuro help
 
 Ontology (opt-in):
@@ -73,6 +79,15 @@ report options:
                    and free text (loop ids, issue/PR numbers, claims, stop-line
                    names, payloads) — only counts, KPIs, and kind names remain.
                    Use public for anything leaving your machine.
+
+adopt options:
+  --from <loop>    Source loop id
+  --into <loop>    Target loop id (must already have events — start it with loop_start)
+  --kind <k1,k2>   Only adopt these kinds (comma-separated; default: all except loop
+                   boundaries, which are never adopted)
+  --pr <n>         Only adopt events scoped to this PR
+  --since <t>      Only adopt events at or after this instant (ISO 8601 or unix epoch)
+  --dry-run        Show what would be adopted without writing
 
 log-event options:
   --loop <id>      Logical loop name (e.g. parent issue slug)
@@ -109,6 +124,10 @@ interface CliValues {
   'closes-when'?: string;
   at?: string;
   file?: string;
+  from?: string;
+  into?: string;
+  since?: string;
+  'dry-run': boolean;
   days: string;
   limit: string;
   json: boolean;
@@ -164,6 +183,10 @@ function main(): void {
       'closes-when': { type: 'string' },
       at: { type: 'string' },
       file: { type: 'string' },
+      from: { type: 'string' },
+      into: { type: 'string' },
+      since: { type: 'string' },
+      'dry-run': { type: 'boolean', default: false },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -200,6 +223,8 @@ function main(): void {
       return listEvents(cli);
     case 'import':
       return importEvents(cli);
+    case 'adopt':
+      return adoptEvents(cli);
     case 'report':
       return report(cli);
     case 'lint':
@@ -346,6 +371,108 @@ function normalizeAt(input: string): string | null {
     ms = parsed;
   }
   return new Date(ms).toISOString();
+}
+
+/**
+ * Copies selected events from one loop into another as declared amendments (#47, ADR 0010).
+ * `import` derives loop_id as <source>:<subject.id>, so harness-captured events land in a
+ * session-scoped loop while the work belongs to a semantic loop; adopt re-attributes them
+ * without touching the originals. Each adopted row keeps the source ts and carries
+ * data.backfill plus provenance (adopted_from, adopted_row), and is idempotent on
+ * (target loop, adopted_row) — loop_start/loop_end are never adopted, since loop boundaries
+ * belong to the loop that actually opened/closed them.
+ */
+function adoptEvents(values: CliValues): void {
+  if (values.from === undefined || values.into === undefined) {
+    console.error('adopt requires --from <source-loop> and --into <target-loop>');
+    process.exit(1);
+  }
+  if (values.from === values.into) {
+    console.error('adopt: --from and --into must be different loops');
+    process.exit(1);
+  }
+  const db = openDb();
+  const count = (loop: string): number =>
+    (db.prepare('SELECT COUNT(*) AS n FROM events WHERE loop_id = ?').get(loop) as { n: number }).n;
+  if (count(values.from) === 0) {
+    db.close();
+    console.error(`adopt: source loop "${values.from}" has no events`);
+    process.exit(1);
+  }
+  if (count(values.into) === 0) {
+    db.close();
+    console.error(`adopt: target loop "${values.into}" has no events — start it first (loop_start)`);
+    process.exit(1);
+  }
+
+  const conditions = ["loop_id = ?", "kind NOT IN ('loop_start','loop_end')"];
+  const params: (string | number)[] = [values.from];
+  if (values.kind !== undefined) {
+    const kinds = values.kind.split(',').map((k) => k.trim()).filter((k) => k.length > 0);
+    if (kinds.length > 0) {
+      conditions.push(`kind IN (${kinds.map(() => '?').join(',')})`);
+      params.push(...kinds);
+    }
+  }
+  if (values.pr !== undefined) {
+    conditions.push('pr = ?');
+    params.push(toInt('pr', values.pr) ?? -1);
+  }
+  if (values.since !== undefined) {
+    const since = normalizeAt(values.since);
+    if (since === null) {
+      db.close();
+      console.error(`--since is not a recognizable instant: ${values.since} (ISO 8601 or unix epoch seconds/ms)`);
+      process.exit(1);
+    }
+    conditions.push('ts >= ?');
+    params.push(since);
+  }
+  const candidates = db
+    .prepare(`SELECT * FROM events WHERE ${conditions.join(' AND ')} ORDER BY id`)
+    .all(...params) as unknown as EventRow[];
+
+  const alreadyAdopted = db.prepare(
+    `SELECT 1 FROM events WHERE loop_id = ? AND json_extract(data,'$.adopted_row') = ? LIMIT 1`,
+  );
+  const toAdopt: EventRow[] = [];
+  let skipped = 0;
+  for (const row of candidates) {
+    if (alreadyAdopted.get(values.into, row.id) !== undefined) {
+      skipped += 1;
+      continue;
+    }
+    toAdopt.push(row);
+  }
+
+  if (values['dry-run']) {
+    db.close();
+    console.log(
+      `adopt (dry-run): ${toAdopt.length} event(s) would be adopted from ${values.from} into ${values.into} (${skipped} already adopted)`,
+    );
+    for (const row of toAdopt) {
+      console.log(`  #${row.id} ${row.ts} ${row.kind}${row.pr != null ? ` pr=#${row.pr}` : ''}`);
+    }
+    return;
+  }
+
+  const insert = db.prepare(
+    `INSERT INTO events (ts, session, loop_id, issue, pr, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const row of toAdopt) {
+    const basePayload = row.data !== null ? (JSON.parse(row.data) as Record<string, unknown>) : {};
+    const data = JSON.stringify({
+      ...basePayload,
+      backfill: true,
+      adopted_from: values.from,
+      adopted_row: row.id,
+    });
+    insert.run(row.ts, row.session, values.into, row.issue, row.pr, row.kind, data);
+  }
+  db.close();
+  console.log(
+    `adopted ${toAdopt.length} event(s) from ${values.from} into ${values.into} (skipped ${skipped} already-adopted)`,
+  );
 }
 
 /**

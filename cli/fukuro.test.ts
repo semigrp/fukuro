@@ -1234,3 +1234,106 @@ test('import rejects malformed, foreign-schema, and future-stamped lines with ex
   assert.equal(res.status, 1);
   assert.ok(res.stdout.includes('1 imported, 0 skipped (already present), 3 rejected'), res.stdout);
 });
+
+test('adopt copies an event into the target loop, preserving ts and naming its provenance', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  const sourceRow = cli
+    .db()
+    .prepare("SELECT id, ts FROM events WHERE kind = 'pr_opened'")
+    .get() as { id: number; ts: string };
+  cli.run('log-event', 'loop_start', '--loop', 'T');
+
+  const out = cli.run('adopt', '--from', 'src:abc', '--into', 'T');
+  assert.ok(out.includes('adopted 1 event(s) from src:abc into T (skipped 0 already-adopted)'), out);
+
+  const adopted = cli
+    .db()
+    .prepare("SELECT ts, pr, data FROM events WHERE loop_id = 'T' AND kind = 'pr_opened'")
+    .get() as { ts: string; pr: number; data: string };
+  assert.equal(adopted.ts, sourceRow.ts);
+  assert.equal(adopted.pr, 9);
+  const data = JSON.parse(adopted.data) as Record<string, unknown>;
+  assert.equal(data.backfill, true);
+  assert.equal(data.adopted_from, 'src:abc');
+  assert.equal(data.adopted_row, sourceRow.id);
+});
+
+test('adopt is idempotent on (target loop, adopted_row)', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  cli.run('log-event', 'loop_start', '--loop', 'T');
+  cli.run('adopt', '--from', 'src:abc', '--into', 'T');
+  const again = cli.run('adopt', '--from', 'src:abc', '--into', 'T');
+  assert.ok(again.includes('adopted 0 event(s)') && again.includes('skipped 1 already-adopted'), again);
+  const n = (
+    cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE loop_id = 'T'").get() as { n: number }
+  ).n;
+  assert.equal(n, 2); // loop_start + the one adopted pr_opened, not doubled
+});
+
+test('adopt --dry-run reports without writing', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  cli.run('log-event', 'loop_start', '--loop', 'T');
+  const before = (cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+
+  const out = cli.run('adopt', '--from', 'src:abc', '--into', 'T', '--dry-run');
+  assert.ok(out.includes('adopt (dry-run): 1 event(s) would be adopted from src:abc into T'), out);
+
+  const after = (cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+  assert.equal(after, before);
+});
+
+test('adopt refuses --from equal to --into, and a target with no events', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+
+  const same = spawnCli(cli, 'adopt', '--from', 'src:abc', '--into', 'src:abc');
+  assert.equal(same.status, 1);
+  assert.ok(same.stderr.includes('--from and --into must be different'), same.stderr);
+
+  const noTarget = spawnCli(cli, 'adopt', '--from', 'src:abc', '--into', 'T-unstarted');
+  assert.equal(noTarget.status, 1);
+  assert.ok(noTarget.stderr.includes('has no events'), noTarget.stderr);
+});
+
+test('adopt never moves loop_start/loop_end — loop boundaries stay with their own loop', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'src:abc');
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  cli.run('log-event', 'loop_end', '--loop', 'src:abc');
+  cli.run('log-event', 'loop_start', '--loop', 'T');
+
+  const out = cli.run('adopt', '--from', 'src:abc', '--into', 'T');
+  assert.ok(out.includes('adopted 1 event(s)'), out);
+
+  const kinds = (
+    cli
+      .db()
+      .prepare("SELECT kind FROM events WHERE loop_id = 'T' ORDER BY id")
+      .all() as { kind: string }[]
+  ).map((r) => r.kind);
+  assert.deepEqual(kinds, ['loop_start', 'pr_opened']);
+});
+
+test('adopt --kind/--pr/--since filter which events are adopted', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '10');
+  cli.run('log-event', 'review_round', '--loop', 'src:abc', '--pr', '9');
+  cli.run('log-event', 'loop_start', '--loop', 'T');
+
+  const out = cli.run('adopt', '--from', 'src:abc', '--into', 'T', '--kind', 'pr_opened', '--pr', '9');
+  assert.ok(out.includes('adopted 1 event(s)'), out);
+  const kinds = (
+    cli
+      .db()
+      .prepare("SELECT kind, pr FROM events WHERE loop_id = 'T' AND kind != 'loop_start'")
+      .all() as { kind: string; pr: number }[]
+  ).map((r) => ({ kind: r.kind, pr: r.pr }));
+  assert.deepEqual(kinds, [{ kind: 'pr_opened', pr: 9 }]);
+
+  const future = cli.run('adopt', '--from', 'src:abc', '--into', 'T', '--since', '2999-01-01T00:00:00.000Z');
+  assert.ok(future.includes('adopted 0 event(s)'), future);
+});
