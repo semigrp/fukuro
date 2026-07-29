@@ -853,6 +853,21 @@ const ISSUE_SCOPED_KINDS = ['loop_start', 'issue_closed'];
 // Above this many open-PR candidates, hoot stops enumerating and only warns.
 const HOOT_CANDIDATE_CAP = 5;
 
+// A correction (a human stepping in, a stop line firing) is a signal that
+// already happened; the return path is what the loop did with it. These are
+// the kinds that discharge one — recorded learning or a recorded repair.
+const RETURN_PATH_KINDS = [
+  'finding',
+  'improve_applied',
+  'decision_made',
+  'concept_captured',
+  'procedure_defined',
+  'hypothesis_opened',
+];
+const CORRECTION_KINDS = ['human_intervention', 'stop_line_hit'];
+// How long a correction has to produce something before the silence counts.
+const CORRECTION_FOLLOW_DAYS = 7;
+
 // Open-ledger pair rules (derive, don't store): an opening kind creates an
 // obligation that only its closing kinds discharge. Rules are data — adding a
 // pair needs no new query code. Staleness is measured from the scope's last
@@ -867,6 +882,25 @@ const PAIR_RULES = [
     closedBy: ['hypothesis_confirmed', 'hypothesis_refuted'],
     scopeExpr: "json_extract(data,'$.id')",
     staleAfterDays: 14,
+  },
+  // A correction with nothing behind it is the loop forgetting why it was
+  // corrected. Scoped to the correction's own loop: a finding logged elsewhere
+  // is not this correction's answer. Deliberately no volume target anywhere —
+  // the obligation exists because a signal fired, so the only way to discharge
+  // it is to answer that signal, not to write more return-path events.
+  {
+    pair: 'correction',
+    opened: 'human_intervention',
+    closedBy: RETURN_PATH_KINDS,
+    scopeExpr: 'loop_id',
+    staleAfterDays: 3,
+  },
+  {
+    pair: 'stop-line',
+    opened: 'stop_line_hit',
+    closedBy: RETURN_PATH_KINDS,
+    scopeExpr: 'loop_id',
+    staleAfterDays: 3,
   },
 ];
 
@@ -970,6 +1004,13 @@ function loadOntology(): Ontology | null {
 // `<source>:<id>` is the documented shape import (#39) derives loop ids in —
 // a colon reliably marks a loop as adapter-owned rather than hand-named.
 const isAdapterOwnedLoop = (loop: string): boolean => loop.includes(':');
+
+// Origin of a row: imported through the v1 contract (#39), or written here by
+// log-event. `data.sourceEventId` is the honest discriminator — import always
+// stamps it and nothing else does. `data.source` alone is NOT: a hand-written
+// finding may legitimately record its own provenance under that key.
+const IMPORTED_EXPR = `json_extract(data,'$.sourceEventId') IS NOT NULL`;
+const DIRECT_ONLY = ` AND NOT (${IMPORTED_EXPR})`;
 
 const HYPOTHESIS_KINDS = ['hypothesis_opened', 'hypothesis_confirmed', 'hypothesis_refuted'];
 const slugify = (s: string): string =>
@@ -1289,12 +1330,28 @@ function report(values: CliValues): void {
     )
     .all(since, ...loopParams) as unknown as StopLineRow[];
 
-  const byKind = db
+  // Split by origin (#53): a harness adapter emits session chatter in bulk, so
+  // a single ranked list buries the handful of events the loop actually wrote.
+  const byKindRows = db
     .prepare(
-      `SELECT kind, COUNT(*) AS n FROM events
-       WHERE ts >= datetime('now', ?)${loopClause} GROUP BY kind ORDER BY n DESC`,
+      `SELECT kind, ${IMPORTED_EXPR} AS imported, COUNT(*) AS n FROM events
+       WHERE ts >= datetime('now', ?)${loopClause}
+       GROUP BY kind, imported ORDER BY n DESC`,
     )
-    .all(since, ...loopParams) as unknown as { kind: string; n: number }[];
+    .all(since, ...loopParams) as unknown as { kind: string; imported: number; n: number }[];
+  const kindTotals = new Map<string, number>();
+  for (const r of byKindRows) kindTotals.set(r.kind, (kindTotals.get(r.kind) ?? 0) + r.n);
+  const byKind = [...kindTotals]
+    .map(([kind, n]) => ({ kind, n }))
+    .sort((a, b) => b.n - a.n || a.kind.localeCompare(b.kind));
+  const byOrigin: EventsByOrigin = {
+    direct: byKindRows.filter((r) => r.imported === 0).map((r) => ({ kind: r.kind, n: r.n })),
+    imported: byKindRows.filter((r) => r.imported === 1).map((r) => ({ kind: r.kind, n: r.n })),
+  };
+  const originTotals = {
+    direct: byOrigin.direct.reduce((a, r) => a + r.n, 0),
+    imported: byOrigin.imported.reduce((a, r) => a + r.n, 0),
+  };
 
   // Per merged PR: review rounds and open→merge lead time.
   const mergedPrsBase = (
@@ -1358,6 +1415,12 @@ function report(values: CliValues): void {
 
   // Attribution coverage over the window. SUM(...) over zero rows is NULL,
   // hence the ratio() null handling.
+  //
+  // Directly-written rows only (#53). Attribution measures the writing
+  // discipline of this loop, and an imported row is attributed by the importer
+  // by construction — session is stamped at import time, loop_id is derived
+  // from the contract's subject. Counting them reads as 100% coverage no
+  // matter how the loop actually behaved, which is worse than no KPI at all.
   const ratio = (part: number | null, total: number): number | null =>
     total === 0 ? null : Math.round(((part ?? 0) / total) * 100) / 100;
   const windowTotals = db
@@ -1365,7 +1428,7 @@ function report(values: CliValues): void {
       `SELECT COUNT(*) AS total,
               SUM(session IS NOT NULL) AS with_session,
               SUM(loop_id IS NOT NULL) AS with_loop
-       FROM events WHERE ts >= datetime('now', ?)${loopClause}`,
+       FROM events WHERE ts >= datetime('now', ?)${loopClause}${DIRECT_ONLY}`,
     )
     .get(since, ...loopParams) as unknown as {
     total: number;
@@ -1382,7 +1445,7 @@ function report(values: CliValues): void {
                 SUM(${column} IS NOT NULL${column === 'pr' ? ` OR ${ackExpr}` : ''}) AS with_field
          FROM events
          WHERE kind IN (${kinds.map(() => '?').join(',')})
-           AND ts >= datetime('now', ?)${loopClause}`,
+           AND ts >= datetime('now', ?)${loopClause}${DIRECT_ONLY}`,
       )
       .get(...kinds, since, ...loopParams) as unknown as {
       total: number;
@@ -1398,7 +1461,7 @@ function report(values: CliValues): void {
               SUM(json_extract(data,'$.signal') IS NOT NULL
                   AND json_extract(data,'$.signal') <> '') AS with_field
        FROM events
-       WHERE kind = 'improve_applied' AND ts >= datetime('now', ?)${loopClause}`,
+       WHERE kind = 'improve_applied' AND ts >= datetime('now', ?)${loopClause}${DIRECT_ONLY}`,
     )
     .get(since, ...loopParams) as unknown as { total: number; with_field: number | null };
   const unattributedTicks = (
@@ -1406,10 +1469,70 @@ function report(values: CliValues): void {
       .prepare(
         `SELECT COUNT(*) AS n FROM events
          WHERE kind = 'tick' AND pr IS NULL AND NOT (${ackExpr})
-           AND ts >= datetime('now', ?)${loopClause}`,
+           AND ts >= datetime('now', ?)${loopClause}${DIRECT_ONLY}`,
       )
       .get(since, ...loopParams) as unknown as { n: number }
   ).n;
+
+  // Correction follow-through: of the corrections that fired in this window,
+  // how many produced a return-path event in their own loop. Deliberately a
+  // coverage ratio and not a return-path share of all events — a share falls
+  // whenever delivery speeds up, which rewards padding the log with findings
+  // nothing asked for. Coverage can only be raised by answering a signal that
+  // actually fired.
+  //
+  // A correction younger than the follow window has not had its chance yet, so
+  // it is counted as pending rather than dragging the rate down; one with no
+  // loop_id cannot be paired at all. Both are reported instead of dropped.
+  //
+  // "After" is event time (ts, id as tiebreak), not row id — the same rule the
+  // orphan-lifecycle check uses. Row id is insertion order, and `--at` backfills
+  // an event at a historical instant with a fresh id, so ordering by id would
+  // let a finding that predates the correction discharge it. Ordering by ts also
+  // makes the window one-sided for free: f.ts > c.ts forces a positive delta.
+  const correctionRow = db
+    .prepare(
+      `SELECT
+         SUM(matured) AS matured,
+         SUM(matured AND followed) AS followed,
+         SUM(NOT matured) AS pending
+       FROM (
+         SELECT julianday('now') - julianday(c.ts) >= ? AS matured,
+                EXISTS (SELECT 1 FROM events f
+                        WHERE f.loop_id = c.loop_id
+                          AND (f.ts > c.ts OR (f.ts = c.ts AND f.id > c.id))
+                          AND f.kind IN (${RETURN_PATH_KINDS.map(() => '?').join(',')})
+                          AND julianday(f.ts) - julianday(c.ts) <= ?) AS followed
+         FROM events c
+         WHERE c.kind IN (${CORRECTION_KINDS.map(() => '?').join(',')})
+           AND c.loop_id IS NOT NULL
+           AND c.ts >= datetime('now', ?)${loop === null ? '' : ' AND c.loop_id = ?'}
+       )`,
+    )
+    .get(
+      CORRECTION_FOLLOW_DAYS,
+      ...RETURN_PATH_KINDS,
+      CORRECTION_FOLLOW_DAYS,
+      ...CORRECTION_KINDS,
+      since,
+      ...loopParams,
+    ) as unknown as { matured: number | null; followed: number | null; pending: number | null };
+  const unscopedCorrections = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM events
+         WHERE kind IN (${CORRECTION_KINDS.map(() => '?').join(',')})
+           AND loop_id IS NULL AND ts >= datetime('now', ?)`,
+      )
+      .get(...CORRECTION_KINDS, since) as unknown as { n: number }
+  ).n;
+  const correctionFollowThrough: CorrectionStats = {
+    matured: correctionRow.matured ?? 0,
+    followed: correctionRow.followed ?? 0,
+    rate: ratio(correctionRow.followed, correctionRow.matured ?? 0),
+    pending: correctionRow.pending ?? 0,
+    unscoped: loop === null ? unscopedCorrections : 0,
+  };
 
   // Unit-size KPI (principle 3: small verifiable units, ~100 changed lines per
   // child PR). Sizes come from data.additions/deletions on pr_opened/merged —
@@ -1485,13 +1608,17 @@ function report(values: CliValues): void {
     stop_line_hits: count('stop_line_hit'),
     stop_lines: stopLines,
     human_interventions: count('human_intervention'),
+    events_by_origin: originTotals,
     attribution_coverage: {
+      basis_direct_events: windowTotals.total,
+      excluded_imported: originTotals.imported,
       session: ratio(windowTotals.with_session, windowTotals.total),
       loop_id: ratio(windowTotals.with_loop, windowTotals.total),
       pr_scoped_pr: ratio(prScoped.with_field, prScoped.total),
       issue_scoped_issue: ratio(issueScoped.with_field, issueScoped.total),
       improve_applied_signal: ratio(signalCoverage.with_field, signalCoverage.total),
     },
+    correction_follow_through: correctionFollowThrough,
     unit_size: unitSize,
     merge_wait: mergeWait,
     // The ledger is all-time, like open hypotheses: an obligation opened last
@@ -1528,9 +1655,9 @@ function report(values: CliValues): void {
   if (format === 'json') {
     output = JSON.stringify(summary, null, 2);
   } else if (format === 'md') {
-    output = renderMarkdown(summary, byKind);
+    output = renderMarkdown(summary, byOrigin);
   } else {
-    output = renderText(summary, byKind);
+    output = renderText(summary, byOrigin);
   }
 
   if (values.out !== undefined) {
@@ -1565,6 +1692,25 @@ interface MergeWaitStats {
   max_wait_hours: number | null;
 }
 
+interface EventsByOrigin {
+  direct: { kind: string; n: number }[];
+  imported: { kind: string; n: number }[];
+}
+
+/**
+ * Correction follow-through (#53 companion): corrections that produced a
+ * return-path event in their own loop. `matured` is the denominator — anything
+ * younger than CORRECTION_FOLLOW_DAYS is `pending`, not a miss. `unscoped`
+ * corrections carry no loop_id and cannot be paired either way.
+ */
+interface CorrectionStats {
+  matured: number;
+  followed: number;
+  rate: number | null;
+  pending: number;
+  unscoped: number;
+}
+
 type ReportSummary = {
   window_days: number;
   loop: string | null;
@@ -1577,13 +1723,17 @@ type ReportSummary = {
   stop_line_hits: number;
   stop_lines: StopLineRow[];
   human_interventions: number;
+  events_by_origin: { direct: number; imported: number };
   attribution_coverage: {
+    basis_direct_events: number;
+    excluded_imported: number;
     session: number | null;
     loop_id: number | null;
     pr_scoped_pr: number | null;
     issue_scoped_issue: number | null;
     improve_applied_signal: number | null;
   };
+  correction_follow_through: CorrectionStats;
   unit_size: UnitSizeStats;
   merge_wait: MergeWaitStats;
   open_ledger: LedgerEntry[];
@@ -1612,13 +1762,18 @@ function pct(value: number | null): string {
   return value === null ? '-' : `${Math.round(value * 100)}%`;
 }
 
-function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
+function renderText(summary: ReportSummary, byOrigin: EventsByOrigin): string {
   const lines: string[] = [];
   const scope = summary.loop === null ? '' : ` — loop ${summary.loop}`;
   lines.push(`fukuro report — last ${summary.window_days} day(s)${scope}`, '');
-  lines.push('events by kind:');
-  for (const r of byKind) lines.push(`  ${r.kind.padEnd(20)} ${r.n}`);
-  if (byKind.length === 0) lines.push('  (no events)');
+  lines.push('events by kind (written here):');
+  for (const r of byOrigin.direct) lines.push(`  ${r.kind.padEnd(20)} ${r.n}`);
+  if (byOrigin.direct.length === 0) lines.push('  (no events)');
+  if (byOrigin.imported.length > 0) {
+    lines.push('');
+    lines.push(`events by kind (imported): ${summary.events_by_origin.imported} total`);
+    for (const r of byOrigin.imported) lines.push(`  ${r.kind.padEnd(20)} ${r.n}`);
+  }
   lines.push('');
   lines.push(`merged PRs:                ${summary.merged_prs}`);
   lines.push(`review rounds / merged PR: ${summary.review_rounds_per_merged_pr ?? '-'}`);
@@ -1634,12 +1789,25 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
   lines.push(`human interventions:       ${summary.human_interventions}`);
   const c = summary.attribution_coverage;
   lines.push('');
-  lines.push('attribution coverage:');
+  lines.push(
+    `attribution coverage (${c.basis_direct_events} event(s) written here` +
+      `${c.excluded_imported > 0 ? `; ${c.excluded_imported} imported excluded` : ''}):`,
+  );
   lines.push(`  events with session:            ${pct(c.session)}`);
   lines.push(`  events with loop:               ${pct(c.loop_id)}`);
   lines.push(`  PR-scoped events with pr:       ${pct(c.pr_scoped_pr)}`);
   lines.push(`  issue-scoped events with issue: ${pct(c.issue_scoped_issue)}`);
   lines.push(`  improve_applied with signal:    ${pct(c.improve_applied_signal)}`);
+  const cf = summary.correction_follow_through;
+  if (cf.matured + cf.pending + cf.unscoped > 0) {
+    lines.push('');
+    lines.push(`correction follow-through (within ${CORRECTION_FOLLOW_DAYS}d, same loop):`);
+    lines.push(
+      `  answered:                       ${pct(cf.rate)} (${cf.followed}/${cf.matured})`,
+    );
+    if (cf.pending > 0) lines.push(`  too recent to judge:            ${cf.pending}`);
+    if (cf.unscoped > 0) lines.push(`  unpairable (no loop):           ${cf.unscoped}`);
+  }
   const u = summary.unit_size;
   if (u.prs_total > 0) {
     lines.push('');
@@ -1697,7 +1865,7 @@ function renderText(summary: ReportSummary, byKind: { kind: string; n: number }[
  * deliver this through connectors instead: `--out` into an Obsidian vault,
  * `gh issue comment --body-file`, or an agent pasting it into Notion.
  */
-function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: number }[]): string {
+function renderMarkdown(summary: ReportSummary, byOrigin: EventsByOrigin): string {
   const h = summary.hypotheses;
   const lines: string[] = [];
   const scope = summary.loop === null ? '' : ` — loop \`${summary.loop}\``;
@@ -1718,6 +1886,11 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   if (warn) lines.push(`> ⚠ ${warn}`, '');
   const c = summary.attribution_coverage;
   lines.push('## Attribution coverage', '');
+  lines.push(
+    `_Over the ${c.basis_direct_events} event(s) written here` +
+      `${c.excluded_imported > 0 ? `; ${c.excluded_imported} imported event(s) excluded — an importer attributes them by construction` : ''}._`,
+    '',
+  );
   lines.push('| field | coverage |');
   lines.push('|---|---|');
   lines.push(`| events with session | ${pct(c.session)} |`);
@@ -1726,6 +1899,21 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
   lines.push(`| issue-scoped events with issue | ${pct(c.issue_scoped_issue)} |`);
   lines.push(`| improve_applied with signal | ${pct(c.improve_applied_signal)} |`);
   lines.push('');
+  const cf = summary.correction_follow_through;
+  if (cf.matured + cf.pending + cf.unscoped > 0) {
+    lines.push('## Correction follow-through', '');
+    lines.push(
+      `_Corrections (\`${CORRECTION_KINDS.join('`, `')}\`) that produced a return-path ` +
+        `event in the same loop within ${CORRECTION_FOLLOW_DAYS} day(s)._`,
+      '',
+    );
+    lines.push('| metric | value |');
+    lines.push('|---|---|');
+    lines.push(`| answered | ${pct(cf.rate)} (${cf.followed}/${cf.matured}) |`);
+    if (cf.pending > 0) lines.push(`| too recent to judge | ${cf.pending} |`);
+    if (cf.unscoped > 0) lines.push(`| unpairable (no loop) | ${cf.unscoped} |`);
+    lines.push('');
+  }
   const u = summary.unit_size;
   if (u.prs_total > 0) {
     lines.push(`## Unit size (principle 3, target ≤${UNIT_SIZE_TARGET} lines)`, '');
@@ -1808,10 +1996,13 @@ function renderMarkdown(summary: ReportSummary, byKind: { kind: string; n: numbe
     lines.push('');
   }
   lines.push('## Events by kind', '');
-  lines.push('| kind | count |');
-  lines.push('|---|---|');
-  for (const r of byKind) lines.push(`| ${r.kind} | ${r.n} |`);
-  if (byKind.length === 0) lines.push('| _(no events)_ | |');
+  lines.push('| kind | count | origin |');
+  lines.push('|---|---|---|');
+  for (const r of byOrigin.direct) lines.push(`| ${r.kind} | ${r.n} | written here |`);
+  for (const r of byOrigin.imported) lines.push(`| ${r.kind} | ${r.n} | imported |`);
+  if (byOrigin.direct.length + byOrigin.imported.length === 0) {
+    lines.push('| _(no events)_ | | |');
+  }
   return lines.join('\n');
 }
 

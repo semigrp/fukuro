@@ -317,6 +317,8 @@ test('--profile public leaks no identifiers or free text in any format', () => {
 });
 
 type Coverage = {
+  basis_direct_events: number;
+  excluded_imported: number;
   session: number | null;
   loop_id: number | null;
   pr_scoped_pr: number | null;
@@ -341,6 +343,8 @@ test('report: coverage ratios and warning when most ticks lack pr', () => {
   const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
   assert.equal(summary.unattributed_ticks, 2);
   assert.deepEqual(summary.attribution_coverage, {
+    basis_direct_events: 5,
+    excluded_imported: 0,
     session: 0.6, // 3 of 5 events
     loop_id: 0.8, // 4 of 5 events
     pr_scoped_pr: 0.5, // 3 ticks + merged, pr on 2
@@ -349,7 +353,7 @@ test('report: coverage ratios and warning when most ticks lack pr', () => {
   });
   const text = cli.run('report');
   assert.ok(text.includes('warn: 2 of 3 ticks in this window have no pr'));
-  assert.ok(text.includes('attribution coverage:'));
+  assert.ok(text.includes('attribution coverage (5 event(s) written here):'));
   assert.ok(cli.run('report', '--format', 'md').includes('## Attribution coverage'));
 });
 
@@ -360,6 +364,8 @@ test('report: fully attributed window has full coverage and no warning', () => {
   const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
   assert.equal(summary.unattributed_ticks, 0);
   assert.deepEqual(summary.attribution_coverage, {
+    basis_direct_events: 2,
+    excluded_imported: 0,
     session: 1,
     loop_id: 1,
     pr_scoped_pr: 1,
@@ -375,12 +381,152 @@ test('report: coverage is null when there are no relevant events', () => {
   const summary = JSON.parse(cli.run('report', '--format', 'json')) as CoverageSummary;
   assert.equal(summary.unattributed_ticks, 0);
   assert.deepEqual(summary.attribution_coverage, {
+    basis_direct_events: 0,
+    excluded_imported: 0,
     session: null,
     loop_id: null,
     pr_scoped_pr: null,
     issue_scoped_issue: null,
     improve_applied_signal: null,
   });
+});
+
+test('report: imported events are counted apart and never inflate attribution', () => {
+  const cli = makeCli();
+  // One unattributed local write against a bulk of importer-attributed rows:
+  // pooled, the importer's own bookkeeping would report near-perfect coverage.
+  cli.runEnv({ FUKURO_SESSION: '' }, 'log-event', 'tick');
+  const file = join(cli.dir, 'events.ndjson');
+  writeFileSync(
+    file,
+    [
+      telemetryLine({ sourceEventId: 'EVT-A', kind: 'tick' }),
+      telemetryLine({ sourceEventId: 'EVT-B', kind: 'tick' }),
+      telemetryLine({ sourceEventId: 'EVT-C', kind: 'tick' }),
+    ].join('\n') + '\n',
+  );
+  cli.run('import', '--file', file);
+
+  const summary = JSON.parse(cli.run('report', '--days', '365', '--format', 'json')) as {
+    events_by_kind: Record<string, number>;
+    events_by_origin: { direct: number; imported: number };
+    attribution_coverage: Coverage;
+  };
+  assert.deepEqual(summary.events_by_origin, { direct: 1, imported: 3 });
+  assert.equal(summary.events_by_kind.tick, 4); // the total still tells the truth
+  assert.equal(summary.attribution_coverage.basis_direct_events, 1);
+  assert.equal(summary.attribution_coverage.excluded_imported, 3);
+  assert.equal(summary.attribution_coverage.session, 0); // 0/1, not 3/4
+  assert.equal(summary.attribution_coverage.loop_id, 0);
+
+  const text = cli.run('report', '--days', '365');
+  assert.ok(text.includes('events by kind (written here):'), text);
+  assert.ok(text.includes('events by kind (imported): 3 total'), text);
+  assert.ok(text.includes('attribution coverage (1 event(s) written here; 3 imported excluded):'), text);
+  const md = cli.run('report', '--days', '365', '--format', 'md');
+  assert.ok(md.includes('| tick | 1 | written here |'), md);
+  assert.ok(md.includes('| tick | 3 | imported |'), md);
+});
+
+type CorrectionStats = {
+  matured: number;
+  followed: number;
+  rate: number | null;
+  pending: number;
+  unscoped: number;
+};
+const correctionSummary = (cli: ReturnType<typeof makeCli>): CorrectionStats =>
+  (
+    JSON.parse(cli.run('report', '--days', '365', '--format', 'json')) as {
+      correction_follow_through: CorrectionStats;
+    }
+  ).correction_follow_through;
+
+test('report: correction follow-through measures answers, not return-path volume', () => {
+  const cli = makeCli();
+  const daysAgo = (n: number): string =>
+    new Date(Date.now() - n * 86400e3).toISOString();
+  // Answered: the correction's own loop produced a finding inside the window.
+  cli.run('log-event', 'human_intervention', '--loop', 'answered', '--at', daysAgo(30));
+  cli.run('log-event', 'finding', '--loop', 'answered', '--at', daysAgo(29));
+  // Unanswered: a finding in a *different* loop is not this correction's answer.
+  cli.run('log-event', 'stop_line_hit', '--loop', 'ignored', '--at', daysAgo(30));
+  cli.run('log-event', 'finding', '--loop', 'elsewhere', '--at', daysAgo(29));
+  // Too recent to have had its chance — pending, not a miss.
+  cli.run('log-event', 'human_intervention', '--loop', 'fresh');
+  // No loop: cannot be paired either way, so it is surfaced separately.
+  cli.run('log-event', 'human_intervention', '--at', daysAgo(30));
+
+  assert.deepEqual(correctionSummary(cli), {
+    matured: 2,
+    followed: 1,
+    rate: 0.5,
+    pending: 1,
+    unscoped: 1,
+  });
+  const text = cli.run('report', '--days', '365');
+  assert.ok(text.includes('correction follow-through (within 7d, same loop):'), text);
+  assert.ok(text.includes('answered:                       50% (1/2)'), text);
+  assert.ok(text.includes('too recent to judge:            1'), text);
+  assert.ok(text.includes('unpairable (no loop):           1'), text);
+});
+
+test('report: a return-path event backfilled before the correction does not answer it', () => {
+  const cli = makeCli();
+  const daysAgo = (n: number): string => new Date(Date.now() - n * 86400e3).toISOString();
+  // The finding is written *after* the correction (higher row id) but stamped
+  // *before* it. Ordering by row id would count it; ordering by ts must not.
+  cli.run('log-event', 'human_intervention', '--loop', 'backfilled', '--at', daysAgo(30));
+  cli.run('log-event', 'finding', '--loop', 'backfilled', '--at', daysAgo(31));
+  const rows = cli
+    .db()
+    .prepare("SELECT kind FROM events ORDER BY id")
+    .all() as unknown as { kind: string }[];
+  assert.deepEqual(rows.map((r) => r.kind), ['human_intervention', 'finding']); // insertion order
+  assert.deepEqual(correctionSummary(cli), {
+    matured: 1,
+    followed: 0,
+    rate: 0,
+    pending: 0,
+    unscoped: 0,
+  });
+});
+
+test('report: a return-path event past the follow window does not count as an answer', () => {
+  const cli = makeCli();
+  const daysAgo = (n: number): string => new Date(Date.now() - n * 86400e3).toISOString();
+  cli.run('log-event', 'human_intervention', '--loop', 'late', '--at', daysAgo(30));
+  cli.run('log-event', 'finding', '--loop', 'late', '--at', daysAgo(20)); // 10 days later
+  assert.deepEqual(correctionSummary(cli), {
+    matured: 1,
+    followed: 0,
+    rate: 0,
+    pending: 0,
+    unscoped: 0,
+  });
+});
+
+test('open ledger: an unanswered correction is an obligation, a return-path event discharges it', () => {
+  const cli = makeCli();
+  const entries = (): { pair: string; scope: string }[] =>
+    (JSON.parse(cli.run('ctx', '--json')) as { open_ledger: { pair: string; scope: string }[] })
+      .open_ledger.filter((e) => e.pair === 'correction' || e.pair === 'stop-line')
+      .map((e) => ({ pair: e.pair, scope: e.scope }));
+
+  cli.run('log-event', 'human_intervention', '--loop', 'L');
+  cli.run('log-event', 'stop_line_hit', '--loop', 'M', '--data', '{"line":"some boundary"}');
+  assert.deepEqual(entries().sort((a, b) => a.scope.localeCompare(b.scope)), [
+    { pair: 'correction', scope: 'L' },
+    { pair: 'stop-line', scope: 'M' },
+  ]);
+
+  cli.run('log-event', 'improve_applied', '--loop', 'L', '--data', '{"signal":"the intervention"}');
+  cli.run('log-event', 'finding', '--loop', 'M');
+  assert.deepEqual(entries(), []);
+
+  // A second correction after the answer re-opens the obligation.
+  cli.run('log-event', 'human_intervention', '--loop', 'L');
+  assert.deepEqual(entries(), [{ pair: 'correction', scope: 'L' }]);
 });
 
 test('report: public profile keeps coverage aggregates', () => {
