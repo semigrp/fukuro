@@ -471,6 +471,27 @@ test('report: correction follow-through measures answers, not return-path volume
   assert.ok(text.includes('unpairable (no loop):           1'), text);
 });
 
+test('report: a return-path event backfilled before the correction does not answer it', () => {
+  const cli = makeCli();
+  const daysAgo = (n: number): string => new Date(Date.now() - n * 86400e3).toISOString();
+  // The finding is written *after* the correction (higher row id) but stamped
+  // *before* it. Ordering by row id would count it; ordering by ts must not.
+  cli.run('log-event', 'human_intervention', '--loop', 'backfilled', '--at', daysAgo(30));
+  cli.run('log-event', 'finding', '--loop', 'backfilled', '--at', daysAgo(31));
+  const rows = cli
+    .db()
+    .prepare("SELECT kind FROM events ORDER BY id")
+    .all() as unknown as { kind: string }[];
+  assert.deepEqual(rows.map((r) => r.kind), ['human_intervention', 'finding']); // insertion order
+  assert.deepEqual(correctionSummary(cli), {
+    matured: 1,
+    followed: 0,
+    rate: 0,
+    pending: 0,
+    unscoped: 0,
+  });
+});
+
 test('report: a return-path event past the follow window does not count as an answer', () => {
   const cli = makeCli();
   const daysAgo = (n: number): string => new Date(Date.now() - n * 86400e3).toISOString();

@@ -1484,6 +1484,12 @@ function report(values: CliValues): void {
   // A correction younger than the follow window has not had its chance yet, so
   // it is counted as pending rather than dragging the rate down; one with no
   // loop_id cannot be paired at all. Both are reported instead of dropped.
+  //
+  // "After" is event time (ts, id as tiebreak), not row id — the same rule the
+  // orphan-lifecycle check uses. Row id is insertion order, and `--at` backfills
+  // an event at a historical instant with a fresh id, so ordering by id would
+  // let a finding that predates the correction discharge it. Ordering by ts also
+  // makes the window one-sided for free: f.ts > c.ts forces a positive delta.
   const correctionRow = db
     .prepare(
       `SELECT
@@ -1493,7 +1499,8 @@ function report(values: CliValues): void {
        FROM (
          SELECT julianday('now') - julianday(c.ts) >= ? AS matured,
                 EXISTS (SELECT 1 FROM events f
-                        WHERE f.loop_id = c.loop_id AND f.id > c.id
+                        WHERE f.loop_id = c.loop_id
+                          AND (f.ts > c.ts OR (f.ts = c.ts AND f.id > c.id))
                           AND f.kind IN (${RETURN_PATH_KINDS.map(() => '?').join(',')})
                           AND julianday(f.ts) - julianday(c.ts) <= ?) AS followed
          FROM events c
