@@ -14,6 +14,9 @@ and intent.
 | [0006](0006-use-an-append-only-local-telemetry-store.md) | Accepted | Use an append-only, local-first telemetry store |
 | [0007](0007-model-exploration-with-typed-units.md) | Accepted | Model exploration with Concept, Hypothesis, and Procedure units |
 | [0008](0008-measure-native-skill-routing-before-introducing-a-gate.md) | Accepted | Measure native skill routing before introducing a gate |
+| [0009](0009-model-decisions-as-a-typed-unit.md) | Accepted | Model decisions as a typed unit |
+| [0010](0010-adopt-imported-events-into-semantic-loops.md) | Accepted | Adopt imported events into semantic loops |
+| [0011](0011-measure-the-return-path-by-coverage-not-volume.md) | Accepted | Measure the return path by coverage, not volume |
 
 ## Change policy
 
