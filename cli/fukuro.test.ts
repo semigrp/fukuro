@@ -207,6 +207,7 @@ test('an explicit --pr resolves issue from that pr\'s own pr_opened, not the che
 
 test('lint: mismatched-pr-issue flags events whose issue disagrees with that pr\'s pr_opened (#48)', () => {
   const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'A');
   cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '601', '--pr', '603');
   // simulates the pre-fix leakage: a tick recorded against pr 603 with the
   // wrong (branch-derived) issue attached
@@ -230,8 +231,10 @@ test('lint: mismatched-pr-issue is scoped by loop — two loops legitimately reu
   // pr numbers are not unique across projects sharing one fukuro.db (same
   // concern resolveIssueForPr documents) — loop A's pr 5 and loop B's pr 5
   // are different units with different issues, and neither is a mistake.
+  cli.run('log-event', 'loop_start', '--loop', 'A');
   cli.run('log-event', 'pr_opened', '--loop', 'A', '--issue', '10', '--pr', '5');
   cli.run('log-event', 'tick', '--loop', 'A', '--issue', '10', '--pr', '5');
+  cli.run('log-event', 'loop_start', '--loop', 'B');
   cli.run('log-event', 'pr_opened', '--loop', 'B', '--issue', '20', '--pr', '5');
   cli.run('log-event', 'tick', '--loop', 'B', '--issue', '20', '--pr', '5');
   const res = spawnCli(cli, 'lint');
@@ -775,6 +778,112 @@ test('loop_end guard (#56): a reopened loop (loop_start after a close) can be cl
   assert.equal(rows.n, 2);
 });
 
+test('loop-boundary guard (#56): pr_opened into a loop with loop_start succeeds', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-g');
+  const ok = spawnCli(cli, 'log-event', 'pr_opened', '--loop', 'demo-loop-g', '--pr', '1');
+  assert.equal(ok.status, 0, ok.stderr);
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='pr_opened' AND loop_id='demo-loop-g'")
+    .get() as { n: number };
+  assert.equal(rows.n, 1);
+});
+
+test('loop-boundary guard (#56): an explicit --loop with no loop_start refuses pr_opened', () => {
+  const cli = makeCli();
+  const refused = spawnCli(cli, 'log-event', 'pr_opened', '--loop', 'demo-loop-h', '--pr', '1');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('hoot:'));
+  assert.ok(refused.stderr.includes('--allow-orphan-loop'));
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='pr_opened'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 0);
+});
+
+test('loop-boundary guard (#56): merged and issue_closed into a loop with no loop_start are refused', () => {
+  const cli = makeCli();
+  const mergedRefused = spawnCli(cli, 'log-event', 'merged', '--loop', 'demo-loop-i', '--pr', '1');
+  assert.equal(mergedRefused.status, 2);
+  assert.ok(mergedRefused.stderr.includes('--allow-orphan-loop'));
+  const closedRefused = spawnCli(cli, 'log-event', 'issue_closed', '--loop', 'demo-loop-i', '--issue', '1');
+  assert.equal(closedRefused.status, 2);
+  assert.ok(closedRefused.stderr.includes('--allow-orphan-loop'));
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE loop_id='demo-loop-i'")
+    .get() as { n: number };
+  assert.equal(rows.n, 0, 'both refused writes must not append a row');
+});
+
+test('loop-boundary guard (#56): --allow-orphan-loop records past the guard and self-declares the override', () => {
+  const cli = makeCli();
+  const ok = spawnCli(cli, 'log-event', 'pr_opened', '--loop', 'demo-loop-j', '--pr', '1', '--allow-orphan-loop');
+  assert.equal(ok.status, 0, ok.stderr);
+  const row = cli
+    .db()
+    .prepare("SELECT data FROM events WHERE kind='pr_opened' AND loop_id='demo-loop-j'")
+    .get() as { data: string };
+  assert.equal((JSON.parse(row.data) as { guard_override: string }).guard_override, 'missing_loop_start');
+});
+
+test('loop-boundary guard (#56): tick into a loop with no loop_start is recorded with a warning, not refused', () => {
+  const cli = makeCli();
+  const warned = spawnCli(cli, 'log-event', 'tick', '--loop', 'demo-loop-k');
+  assert.equal(warned.status, 0, warned.stderr);
+  assert.ok(warned.stderr.includes('hoot:'));
+  assert.ok(warned.stderr.includes('loop_start'));
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='tick' AND loop_id='demo-loop-k'")
+    .get() as { n: number };
+  assert.equal(rows.n, 1, 'the write goes through despite the warning');
+});
+
+test('loop-boundary guard (#56): data.re_record on pr_opened bypasses the guard', () => {
+  const cli = makeCli();
+  const ok = spawnCli(
+    cli,
+    'log-event',
+    'pr_opened',
+    '--loop',
+    'demo-loop-l',
+    '--pr',
+    '1',
+    '--data',
+    '{"re_record":true}',
+  );
+  assert.equal(ok.status, 0, ok.stderr);
+  const row = cli
+    .db()
+    .prepare("SELECT data FROM events WHERE kind='pr_opened' AND loop_id='demo-loop-l'")
+    .get() as { data: string };
+  const data = JSON.parse(row.data) as Record<string, unknown>;
+  assert.equal(data.re_record, true);
+  assert.equal(data.guard_override, undefined, 'a declared amendment does not need the escape flag');
+});
+
+test('loop-boundary guard (#56): fukuro import bypasses the guard entirely', () => {
+  const cli = makeCli();
+  const file = join(cli.dir, 'events.ndjson');
+  writeFileSync(
+    file,
+    telemetryLine({
+      sourceEventId: 'EVT-000010',
+      kind: 'pr_opened',
+      subject: { system: 'ouro', type: 'run', id: 'RUN-0010', version: '1' },
+    }) + '\n',
+  );
+  const out = cli.run('import', '--file', file);
+  assert.ok(out.includes('1 imported, 0 skipped'), out);
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='pr_opened' AND loop_id='ouro:RUN-0010'")
+    .get() as { n: number };
+  assert.equal(rows.n, 1, 'import never had a loop_start for this loop, yet the row is written');
+});
+
 test('decision_made is a canonical kind and logs cleanly', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'L');
@@ -843,6 +952,7 @@ test('lint: same hypothesis id across loops is info only and exit 0', () => {
 test('lint: review_round/merged without a prior pr_opened warns, one finding per pr', () => {
   const cli = makeCli();
   // pr 7: opened first — clean. pr 8: two later events against an unopened pr.
+  cli.run('log-event', 'loop_start', '--loop', 'L');
   cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '7');
   cli.run('log-event', 'review_round', '--loop', 'L', '--pr', '7');
   cli.run('log-event', 'review_round', '--loop', 'L', '--pr', '8');
@@ -859,6 +969,7 @@ test('lint: review_round/merged without a prior pr_opened warns, one finding per
 
 test('lint: a backfilled pr_opened satisfies earlier pr events', () => {
   const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'L');
   cli.run('log-event', 'merged', '--loop', 'L', '--pr', '9');
   cli.run('log-event', 'pr_opened', '--loop', 'L', '--pr', '9', '--at', '2000-01-01T00:00:00Z');
   const res = spawnCli(cli, 'lint');
@@ -1465,7 +1576,10 @@ test('import rejects malformed, foreign-schema, and future-stamped lines with ex
 
 test('adopt copies an event into the target loop, preserving ts and naming its provenance', () => {
   const cli = makeCli();
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  // src:abc simulates an import-style loop (harness-captured, never loop_start'd
+  // natively) — --allow-orphan-loop stands in for the real path (fukuro import,
+  // which bypasses this guard) without pulling the whole import format in here.
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9', '--allow-orphan-loop');
   const sourceRow = cli
     .db()
     .prepare("SELECT id, ts FROM events WHERE kind = 'pr_opened'")
@@ -1489,7 +1603,8 @@ test('adopt copies an event into the target loop, preserving ts and naming its p
 
 test('adopt is idempotent on (target loop, adopted_row)', () => {
   const cli = makeCli();
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  // src:abc simulates an import-style loop; see the provenance test above.
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9', '--allow-orphan-loop');
   cli.run('log-event', 'loop_start', '--loop', 'T');
   cli.run('adopt', '--from', 'src:abc', '--into', 'T');
   const again = cli.run('adopt', '--from', 'src:abc', '--into', 'T');
@@ -1502,7 +1617,8 @@ test('adopt is idempotent on (target loop, adopted_row)', () => {
 
 test('adopt --dry-run reports without writing', () => {
   const cli = makeCli();
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  // src:abc simulates an import-style loop; see the provenance test above.
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9', '--allow-orphan-loop');
   cli.run('log-event', 'loop_start', '--loop', 'T');
   const before = (cli.db().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
 
@@ -1515,7 +1631,8 @@ test('adopt --dry-run reports without writing', () => {
 
 test('adopt refuses --from equal to --into, and a target with no events', () => {
   const cli = makeCli();
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
+  // src:abc simulates an import-style loop; see the provenance test above.
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9', '--allow-orphan-loop');
 
   const same = spawnCli(cli, 'adopt', '--from', 'src:abc', '--into', 'src:abc');
   assert.equal(same.status, 1);
@@ -1547,8 +1664,9 @@ test('adopt never moves loop_start/loop_end — loop boundaries stay with their 
 
 test('adopt --kind/--pr/--since filter which events are adopted', () => {
   const cli = makeCli();
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9');
-  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '10');
+  // src:abc simulates an import-style loop; see the provenance test above.
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '9', '--allow-orphan-loop');
+  cli.run('log-event', 'pr_opened', '--loop', 'src:abc', '--pr', '10', '--allow-orphan-loop');
   cli.run('log-event', 'review_round', '--loop', 'src:abc', '--pr', '9');
   cli.run('log-event', 'loop_start', '--loop', 'T');
 
