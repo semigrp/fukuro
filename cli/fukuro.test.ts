@@ -697,6 +697,84 @@ test('finding after loop_start auto-attributes to the single open loop', () => {
   assert.equal(row.loop_id, 'L');
 });
 
+test('loop_end guard (#56): a loop with a loop_start closes normally', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-a');
+  const ok = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-a');
+  assert.equal(ok.status, 0);
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='loop_end' AND loop_id='demo-loop-a'")
+    .get() as { n: number };
+  assert.equal(rows.n, 1);
+});
+
+test('loop_end guard (#56): no loop_start on record is refused and does not write a row', () => {
+  const cli = makeCli();
+  const refused = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-b');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('hoot:'));
+  assert.ok(refused.stderr.includes('--allow-orphan-close'));
+  const rows = cli.db().prepare("SELECT COUNT(*) AS n FROM events WHERE kind='loop_end'").get() as {
+    n: number;
+  };
+  assert.equal(rows.n, 0);
+});
+
+test('loop_end guard (#56): a second close on an already-closed loop is refused and does not write a row', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-c');
+  cli.run('log-event', 'loop_end', '--loop', 'demo-loop-c');
+  const refused = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-c');
+  assert.equal(refused.status, 2);
+  assert.ok(refused.stderr.includes('hoot:'));
+  assert.ok(refused.stderr.includes('--allow-double-close'));
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='loop_end' AND loop_id='demo-loop-c'")
+    .get() as { n: number };
+  assert.equal(rows.n, 1, 'the refused write must not append a second row');
+});
+
+test('loop_end guard (#56): the escape flags record past the guard and self-declare the override', () => {
+  const cli = makeCli();
+  // orphan: no loop_start was ever recorded for this loop
+  const orphanOk = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-d', '--allow-orphan-close');
+  assert.equal(orphanOk.status, 0);
+  const orphanRow = cli
+    .db()
+    .prepare("SELECT data FROM events WHERE kind='loop_end' AND loop_id='demo-loop-d'")
+    .get() as { data: string };
+  assert.equal((JSON.parse(orphanRow.data) as { guard_override: string }).guard_override, 'missing_loop_start');
+
+  // double-close: already closed, second loop_end forced through
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-e');
+  cli.run('log-event', 'loop_end', '--loop', 'demo-loop-e');
+  const doubleOk = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-e', '--allow-double-close');
+  assert.equal(doubleOk.status, 0);
+  const closeRow = cli
+    .db()
+    .prepare(
+      "SELECT data FROM events WHERE kind='loop_end' AND loop_id='demo-loop-e' ORDER BY id DESC LIMIT 1",
+    )
+    .get() as { data: string };
+  assert.equal((JSON.parse(closeRow.data) as { guard_override: string }).guard_override, 'double_close');
+});
+
+test('loop_end guard (#56): a reopened loop (loop_start after a close) can be closed again', () => {
+  const cli = makeCli();
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-f');
+  cli.run('log-event', 'loop_end', '--loop', 'demo-loop-f');
+  cli.run('log-event', 'loop_start', '--loop', 'demo-loop-f'); // reopened
+  const ok = spawnCli(cli, 'log-event', 'loop_end', '--loop', 'demo-loop-f');
+  assert.equal(ok.status, 0);
+  const rows = cli
+    .db()
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind='loop_end' AND loop_id='demo-loop-f'")
+    .get() as { n: number };
+  assert.equal(rows.n, 2);
+});
+
 test('decision_made is a canonical kind and logs cleanly', () => {
   const cli = makeCli();
   cli.run('log-event', 'loop_start', '--loop', 'L');
@@ -727,8 +805,10 @@ test('lint: orphan close and unbalanced loop warn and exit 1', () => {
   cli.run('log-event', 'hypothesis_opened', '--loop', 'A', '--id', 'H-9', '--claim', 'late');
   // opened in A but closed in B: the (loop, id) scope must not match across loops
   cli.run('log-event', 'hypothesis_confirmed', '--loop', 'B', '--id', 'H-9');
-  // loop_end without any loop_start
-  cli.run('log-event', 'loop_end', '--loop', 'M');
+  // loop_end without any loop_start — the write-time guard (#56) refuses this
+  // unless acknowledged, so this fixture opts in to still exercise the
+  // read-time unbalanced-loop check below
+  cli.run('log-event', 'loop_end', '--loop', 'M', '--allow-orphan-close');
   const res = spawnCli(cli, 'lint');
   assert.equal(res.status, 1);
   const orphans = res.stdout.match(/warn \[orphan-lifecycle\]/g) ?? [];
@@ -820,10 +900,12 @@ test('lint: a loop_end declaring supersedes/re_record is a correction, not a dou
   cli.run('log-event', 'loop_start', '--loop', 'M');
   cli.run('log-event', 'loop_end', '--loop', 'M');
   cli.run('log-event', 'loop_end', '--loop', 'M', '--data', '{"re_record":true}');
-  // an unmarked duplicate still warns
+  // an unmarked duplicate still warns — force the write past the write-time
+  // guard (#56) with --allow-double-close, which does not touch
+  // supersedes/re_record, so lint still calls this one out
   cli.run('log-event', 'loop_start', '--loop', 'N');
   cli.run('log-event', 'loop_end', '--loop', 'N');
-  cli.run('log-event', 'loop_end', '--loop', 'N');
+  cli.run('log-event', 'loop_end', '--loop', 'N', '--allow-double-close');
   const res = spawnCli(cli, 'lint');
   assert.equal(res.status, 1);
   assert.ok(!res.stdout.includes('loop L') && !res.stdout.includes('loop M'));

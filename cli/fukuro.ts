@@ -106,6 +106,10 @@ log-event options:
                    payload already declares an amendment (backfill, supersedes
                    or re_record), data.backfill=true is added automatically so
                    ledger and lint treat the row as a declared correction
+  --allow-orphan-close   loop_end only: record even though the target loop has
+                   no loop_start (marks data.guard_override=missing_loop_start)
+  --allow-double-close   loop_end only: record even though the target loop is
+                   already closed (marks data.guard_override=double_close)
 
 Canonical kinds:
   ${[...CANONICAL_KINDS].join(' ')}
@@ -128,6 +132,8 @@ interface CliValues {
   into?: string;
   since?: string;
   'dry-run': boolean;
+  'allow-orphan-close': boolean;
+  'allow-double-close': boolean;
   days: string;
   limit: string;
   json: boolean;
@@ -187,6 +193,8 @@ function main(): void {
       into: { type: 'string' },
       since: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
+      'allow-orphan-close': { type: 'boolean', default: false },
+      'allow-double-close': { type: 'boolean', default: false },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -639,6 +647,54 @@ function logEvent(kind: string | undefined, values: CliValues): void {
       'hoot: finding requires a loop — pass --loop <id> (nothing derivable from context). Refused.',
     );
     process.exit(2);
+  }
+  // Write-time lifecycle guard (#56): append-only means an orphan or double
+  // close, once written, is permanent — the only prior detection was lint
+  // reading SUM(loop_start) vs SUM(loop_end) after the fact. Mirrors
+  // deriveLedger's open test (latest opening id beats latest closing id) so a
+  // legitimately reopened loop (loop_start after a close) can still be closed
+  // again; only a loop_end with nothing open behind it is refused. A payload
+  // that already declares itself a correction (data.supersedes or
+  // data.re_record — the same amendment vocabulary the unbalanced-loop lint
+  // check already exempts) is left alone: the writer has already said what
+  // this is. Otherwise each violation has its own escape flag, and using one
+  // leaves data.guard_override behind so an intentional cross-over stays
+  // self-declaring, same as data.backfill.
+  if (kind === 'loop_end' && loop !== null) {
+    const payload: Record<string, unknown> = data !== null ? (JSON.parse(data) as Record<string, unknown>) : {};
+    const declaredAmendment = payload.supersedes !== undefined || Boolean(payload.re_record);
+    if (!declaredAmendment) {
+      const boundary = db
+        .prepare(
+          `SELECT MAX(CASE WHEN kind = 'loop_start' THEN id END) AS last_start,
+                  MAX(CASE WHEN kind = 'loop_end' THEN id END) AS last_end
+           FROM events WHERE loop_id = ?`,
+        )
+        .get(loop) as { last_start: number | null; last_end: number | null };
+      const orphan = boundary.last_start === null;
+      const doubleClose = !orphan && boundary.last_end !== null && boundary.last_end > boundary.last_start!;
+      if (orphan && !values['allow-orphan-close']) {
+        db.close();
+        console.error(
+          `hoot: loop_end for "${loop}" has no loop_start on record — record loop_start first, or if that ` +
+            `is intentional (e.g. a loop that started before fukuro was wired in), pass --allow-orphan-close. Refused.`,
+        );
+        process.exit(2);
+      }
+      if (doubleClose && !values['allow-double-close']) {
+        db.close();
+        console.error(
+          `hoot: loop "${loop}" is already closed — this loop_end has no loop_start after the last close. ` +
+            `If that close was wrong, record a new loop_start first; if this second close is intentional, ` +
+            `pass --allow-double-close. Refused.`,
+        );
+        process.exit(2);
+      }
+      if (orphan || doubleClose) {
+        payload.guard_override = orphan ? 'missing_loop_start' : 'double_close';
+        data = JSON.stringify(payload);
+      }
+    }
   }
   // An explicit --pr names a specific unit; its issue must come from that
   // unit's own pr_opened row, never from the branch-derived issue (a former
