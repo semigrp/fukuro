@@ -110,6 +110,10 @@ log-event options:
                    no loop_start (marks data.guard_override=missing_loop_start)
   --allow-double-close   loop_end only: record even though the target loop is
                    already closed (marks data.guard_override=double_close)
+  --allow-orphan-loop   pr_opened/merged/issue_closed only: record even though
+                   the target loop has no loop_start on record (marks
+                   data.guard_override=missing_loop_start). tick/review_round/
+                   finding never need this — they warn instead of refusing
 
 Canonical kinds:
   ${[...CANONICAL_KINDS].join(' ')}
@@ -134,6 +138,7 @@ interface CliValues {
   'dry-run': boolean;
   'allow-orphan-close': boolean;
   'allow-double-close': boolean;
+  'allow-orphan-loop': boolean;
   days: string;
   limit: string;
   json: boolean;
@@ -195,6 +200,7 @@ function main(): void {
       'dry-run': { type: 'boolean', default: false },
       'allow-orphan-close': { type: 'boolean', default: false },
       'allow-double-close': { type: 'boolean', default: false },
+      'allow-orphan-loop': { type: 'boolean', default: false },
       days: { type: 'string', default: '7' },
       limit: { type: 'string', default: '20' },
       json: { type: 'boolean', default: false },
@@ -696,6 +702,47 @@ function logEvent(kind: string | undefined, values: CliValues): void {
       }
     }
   }
+  // Write-time loop-boundary guard (#56, second half): the loop_end guard above
+  // only catches a missing loop_start at the *close*. The incident that motivated
+  // this one starts earlier — a pr_opened naming a loop_id (explicitly or via
+  // derivation) that never had a loop_start at all, with every later event in
+  // that loop (tick, merged, issue_closed, loop_end) inheriting the same gap.
+  // Read-time lint (unbalanced-loop) already flags this, but it was demonstrably
+  // missed in practice, so pr_opened/merged/issue_closed are refused outright —
+  // same amendment/escape-hatch shape as the loop_end guard (data.supersedes,
+  // data.re_record, or --allow-orphan-loop leaving data.guard_override behind).
+  // tick/review_round/finding hit the same gap but are only warned about: those
+  // are the kinds a delegated worker (no authority to record loop_start) can
+  // still emit, and a hard refusal here would stall their work over something
+  // only the loop's opener can fix.
+  if (loop !== null && (HARD_LOOP_GUARD_KINDS.includes(kind) || SOFT_LOOP_GUARD_KINDS.includes(kind))) {
+    const payload: Record<string, unknown> = data !== null ? (JSON.parse(data) as Record<string, unknown>) : {};
+    const declaredAmendment = payload.supersedes !== undefined || Boolean(payload.re_record);
+    if (!declaredAmendment) {
+      const hasStart =
+        db.prepare(`SELECT 1 FROM events WHERE loop_id = ? AND kind = 'loop_start' LIMIT 1`).get(loop) !==
+        undefined;
+      if (!hasStart) {
+        if (HARD_LOOP_GUARD_KINDS.includes(kind)) {
+          if (!values['allow-orphan-loop']) {
+            db.close();
+            console.error(
+              `hoot: ${kind} for loop "${loop}" has no loop_start on record — record loop_start first, or if ` +
+                `that is intentional, pass --allow-orphan-loop. Refused.`,
+            );
+            process.exit(2);
+          }
+          payload.guard_override = 'missing_loop_start';
+          data = JSON.stringify(payload);
+        } else {
+          console.warn(
+            `hoot: ${kind} for loop "${loop}" has no loop_start on record — someone with authority to open ` +
+              `this loop should record it; not blocking this write.`,
+          );
+        }
+      }
+    }
+  }
   // An explicit --pr names a specific unit; its issue must come from that
   // unit's own pr_opened row, never from the branch-derived issue (a former
   // guard here only compared against a *known* derived pr — when the
@@ -906,6 +953,16 @@ function listEvents(values: CliValues): void {
 // report measures its own measurement quality instead of silently under-reporting.
 const PR_SCOPED_KINDS = ['tick', 'pr_opened', 'review_round', 'merged'];
 const ISSUE_SCOPED_KINDS = ['loop_start', 'issue_closed'];
+// Write-time loop-boundary guard (#56, second half): pr_opened/merged/issue_closed
+// are kinds only a loop's opener (the orchestrator side) issues, so a missing
+// loop_start behind them is refused outright — this is the actual root cause
+// class from the incident (loop_id named explicitly at pr_opened, no loop_start
+// ever recorded). tick/review_round/finding are kinds a delegated worker can
+// issue without the authority to record loop_start, so they are warned about
+// instead of blocked: refusing them would let the telemetry tool stall work
+// the writer has no way to unblock themselves.
+const HARD_LOOP_GUARD_KINDS = ['pr_opened', 'merged', 'issue_closed'];
+const SOFT_LOOP_GUARD_KINDS = ['tick', 'review_round', 'finding'];
 // Above this many open-PR candidates, hoot stops enumerating and only warns.
 const HOOT_CANDIDATE_CAP = 5;
 
